@@ -2866,10 +2866,31 @@ pub struct MySqlTargetFactory {
     config: MySqlEndpointConfig,
     reviewed_catalog: VendorCatalog,
     reviewed_tables: BTreeMap<QualifiedTable, MySqlTableDefinition>,
+    reviewed_table_contracts: BTreeMap<QualifiedTable, TableContract>,
+    cross_conversion_tables: BTreeMap<QualifiedTable, TableConversionPolicy>,
     reviewed_foreign_keys: BTreeMap<String, MySqlForeignKey>,
     target_evidence: MySqlSnapshotEvidence,
     registry: Arc<SessionRegistry>,
     cancellation: CancellationToken,
+}
+
+fn validate_cross_mysql_target_evidence(
+    config: &MySqlEndpointConfig,
+    evidence: &MySqlSnapshotEvidence,
+) -> Result<(), MySqlPlanError> {
+    if evidence.database_identity != config.database
+        || evidence.lower_case_table_names > 2
+        || evidence.session_sql_mode != MYSQL_STRICT_SQL_MODE
+        || evidence.character_set_client != MYSQL_SESSION_CHARACTER_SET
+        || evidence.character_set_connection != MYSQL_SESSION_CHARACTER_SET
+        || evidence.character_set_results != MYSQL_SESSION_CHARACTER_SET
+        || evidence.collation_connection != MYSQL_SESSION_COLLATION
+    {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL target evidence does not bind the required session contract".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl MySqlTargetFactory {
@@ -2893,24 +2914,21 @@ impl MySqlTargetFactory {
         cancellation: CancellationToken,
     ) -> Result<Self, MySqlPlanError> {
         config.validate()?;
-        if target_evidence.database_identity != config.database
-            || target_evidence.lower_case_table_names > 2
-            || target_evidence.session_sql_mode != MYSQL_STRICT_SQL_MODE
-            || target_evidence.character_set_client != MYSQL_SESSION_CHARACTER_SET
-            || target_evidence.character_set_connection != MYSQL_SESSION_CHARACTER_SET
-            || target_evidence.character_set_results != MYSQL_SESSION_CHARACTER_SET
-            || target_evidence.collation_connection != MYSQL_SESSION_COLLATION
-        {
-            return Err(MySqlPlanError::InvalidCatalog(
-                "MySQL target evidence does not bind the required session contract".into(),
-            ));
-        }
+        validate_cross_mysql_target_evidence(&config, &target_evidence)?;
         let target_namespace = Identifier::new(config.database.clone())?;
         let reviewed_tables = mysql_table_definitions(&reviewed_catalog)?
             .into_iter()
             .map(|mut definition| {
                 definition.table.namespace = target_namespace.clone();
                 (definition.table.clone(), definition)
+            })
+            .collect();
+        let reviewed_table_contracts = table_contracts(&reviewed_catalog)
+            .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?
+            .into_iter()
+            .map(|(mut table, contract)| {
+                table.namespace = target_namespace.clone();
+                (table, contract)
             })
             .collect();
         let reviewed_foreign_keys = mysql_foreign_keys(&reviewed_catalog)
@@ -2922,7 +2940,76 @@ impl MySqlTargetFactory {
             config,
             reviewed_catalog,
             reviewed_tables,
+            reviewed_table_contracts,
+            cross_conversion_tables: BTreeMap::new(),
             reviewed_foreign_keys,
+            target_evidence,
+            registry: Arc::default(),
+            cancellation,
+        })
+    }
+
+    /// Construct a MySQL target bound to reviewed PostgreSQL-to-MySQL table
+    /// conversion policies. The empty target catalog remains independent from
+    /// the source catalog; writer and verifier metadata comes only from the
+    /// reviewed typed policies.
+    pub fn new_cross_dialect_with_cancellation(
+        config: MySqlEndpointConfig,
+        reviewed_target_catalog: VendorCatalog,
+        policies: Vec<TableConversionPolicy>,
+        target_evidence: MySqlSnapshotEvidence,
+        cancellation: CancellationToken,
+    ) -> Result<Self, MySqlPlanError> {
+        config.validate()?;
+        validate_cross_mysql_target_evidence(&config, &target_evidence)?;
+        if reviewed_target_catalog.dialect != "mysql"
+            || reviewed_target_catalog.database.as_str() != config.database
+        {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "cross-dialect MySQL target catalog has the wrong dialect or database".into(),
+            ));
+        }
+        let mut reviewed_tables = BTreeMap::new();
+        let mut reviewed_table_contracts = BTreeMap::new();
+        let mut cross_conversion_tables = BTreeMap::new();
+        for policy in policies {
+            policy.validate()?;
+            if policy.row_policy.target_dialect != ConversionDialect::MySql
+                || policy.target_table.namespace.as_str() != config.database
+            {
+                return Err(MySqlPlanError::InvalidCatalog(
+                    "cross-dialect policy does not target the configured MySQL database".into(),
+                ));
+            }
+            let definition = mysql_conversion_table_definition(&policy)?;
+            let contract = mysql_conversion_table_contract(&policy, &target_evidence)?;
+            if reviewed_tables
+                .insert(policy.target_table.clone(), definition)
+                .is_some()
+                || reviewed_table_contracts
+                    .insert(policy.target_table.clone(), contract)
+                    .is_some()
+                || cross_conversion_tables
+                    .insert(policy.target_table.clone(), policy)
+                    .is_some()
+            {
+                return Err(MySqlPlanError::InvalidCatalog(
+                    "cross-dialect target contains a duplicate table policy".into(),
+                ));
+            }
+        }
+        if reviewed_tables.is_empty() {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "cross-dialect MySQL target has no reviewed table policies".into(),
+            ));
+        }
+        Ok(Self {
+            config,
+            reviewed_catalog: reviewed_target_catalog,
+            reviewed_tables,
+            reviewed_table_contracts,
+            cross_conversion_tables,
+            reviewed_foreign_keys: BTreeMap::new(),
             target_evidence,
             registry: Arc::default(),
             cancellation,
@@ -3136,6 +3223,76 @@ impl MySqlTargetFactory {
         if self.inspect_table(expected)? != MySqlTableState::Exact {
             return Err(ConnectionError::Database(
                 "MySQL CREATE TABLE committed without the exact reviewed effect".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Inspect one PostgreSQL-to-MySQL target table against its complete
+    /// reviewed typed conversion policy.
+    pub fn inspect_conversion_table(
+        &self,
+        policy: &TableConversionPolicy,
+    ) -> ConnectionResult<MySqlTableState> {
+        if self.cross_conversion_tables.get(&policy.target_table) != Some(policy) {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL conversion table policy differs from the reviewed target contract".into(),
+            ));
+        }
+        let expected = mysql_conversion_table_definition(policy)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let catalog = self.current_catalog()?;
+        let Some(namespace) = catalog
+            .namespaces
+            .iter()
+            .find(|namespace| namespace.name == policy.target_table.namespace)
+        else {
+            return Ok(MySqlTableState::Absent);
+        };
+        let occupancies = namespace
+            .objects
+            .iter()
+            .filter(|object| {
+                matches!(
+                    object.kind,
+                    CatalogObjectKind::Table | CatalogObjectKind::View
+                ) && object.name == policy.target_table.name
+            })
+            .collect::<Vec<_>>();
+        if occupancies.is_empty() {
+            return Ok(MySqlTableState::Absent);
+        }
+        if occupancies.len() != 1 || occupancies[0].kind != CatalogObjectKind::Table {
+            return Ok(MySqlTableState::Different);
+        }
+        let observed = mysql_table_definition(namespace, occupancies[0])
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        if observed != expected || !mysql_conversion_checks_are_exact(namespace, policy)? {
+            return Ok(MySqlTableState::Different);
+        }
+        Ok(MySqlTableState::Exact)
+    }
+
+    /// Apply one create-only cross-dialect target-table effect. MySQL DDL can
+    /// commit implicitly, so the caller must persist Prepared first.
+    pub fn create_conversion_table(&self, policy: &TableConversionPolicy) -> ConnectionResult<()> {
+        match self.inspect_conversion_table(policy)? {
+            MySqlTableState::Absent => {}
+            MySqlTableState::Exact | MySqlTableState::Different => {
+                return Err(ConnectionError::InvalidRequest(
+                    "MySQL cross-dialect create-only target is not absent".into(),
+                ));
+            }
+        }
+        let ddl = render_mysql_conversion_create_table(policy)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let (mut conn, _registration) = self.controlled_connect()?;
+        self.cancellation.check()?;
+        conn.query_drop(ddl).map_err(database_error)?;
+        self.cancellation.check()?;
+        if self.inspect_conversion_table(policy)? != MySqlTableState::Exact {
+            return Err(ConnectionError::Database(
+                "MySQL CREATE TABLE committed without the exact reviewed conversion effect".into(),
             ));
         }
         Ok(())
@@ -3529,22 +3686,13 @@ impl TargetConnectionFactory for MySqlTargetFactory {
             .map_err(database_error)?;
         conn.query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT")
             .map_err(database_error)?;
-        let target_namespace = Identifier::new(self.config.database.clone())
-            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
-        let table_contracts = table_contracts(&self.reviewed_catalog)?
-            .into_iter()
-            .map(|(mut table, contract)| {
-                table.namespace = target_namespace.clone();
-                (table, contract)
-            })
-            .collect();
         Ok(Box::new(MySqlVerifier {
             conn,
             registration: Some(registration),
             cancellation,
             max_batch_rows: self.config.max_batch_rows,
             max_batch_bytes: self.config.max_batch_bytes,
-            table_contracts,
+            table_contracts: self.reviewed_table_contracts.clone(),
         }))
     }
 
@@ -4507,6 +4655,276 @@ pub fn render_mysql_conversion_create_table(
         quote_identifier(character_set),
         quote_identifier(collation)
     ))
+}
+
+fn mysql_conversion_table_definition(
+    policy: &TableConversionPolicy,
+) -> Result<MySqlTableDefinition, MySqlPlanError> {
+    policy.validate()?;
+    let CrossDialectTargetTableContract::MySql {
+        engine: MySqlTargetEngine::InnoDb,
+        character_set,
+        collation,
+    } = &policy.target_contract
+    else {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL conversion definition has a non-MySQL target contract".into(),
+        ));
+    };
+    let columns = policy
+        .row_policy
+        .columns
+        .iter()
+        .map(|column| {
+            let CrossDialectTargetType::MySql(target_type) = &column.target_type else {
+                return Err(MySqlPlanError::InvalidCatalog(
+                    "MySQL conversion definition contains a non-MySQL column".into(),
+                ));
+            };
+            let data_type = parse_mysql_column_type(&target_type.ddl_type()?)
+                .map_err(MySqlPlanError::InvalidCatalog)?;
+            let (column_character_set, column_collation) = target_type
+                .character_set_and_collation()
+                .map_or((None, None), |(character_set, collation)| {
+                    (
+                        Some(character_set.as_str().to_owned()),
+                        Some(collation.as_str().to_owned()),
+                    )
+                });
+            Ok(MySqlColumnDefinition {
+                name: column.target.name.clone(),
+                ordinal: u64::from(column.target.ordinal),
+                data_type,
+                nullable: column.target.nullable,
+                character_set: column_character_set,
+                collation: column_collation,
+                auto_increment: false,
+            })
+        })
+        .collect::<Result<Vec<_>, MySqlPlanError>>()?;
+    let primary = policy.resumable_key.target_kind == CrossDialectKeyKind::PrimaryKey;
+    let index_name = if primary {
+        Identifier::new("PRIMARY")?
+    } else {
+        policy.resumable_key.target_name.clone().ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog("MySQL conversion unique key has no target name".into())
+        })?
+    };
+    Ok(MySqlTableDefinition {
+        table: policy.target_table.clone(),
+        engine: "InnoDB".into(),
+        character_set: character_set.as_str().into(),
+        collation: collation.as_str().into(),
+        columns,
+        indexes: vec![MySqlIndexDefinition {
+            name: index_name,
+            primary,
+            unique: true,
+            constraint_backed: true,
+            columns: policy.resumable_key.target_columns.clone(),
+        }],
+    })
+}
+
+fn mysql_conversion_table_contract(
+    policy: &TableConversionPolicy,
+    evidence: &MySqlSnapshotEvidence,
+) -> Result<TableContract, MySqlPlanError> {
+    let mut columns = BTreeMap::new();
+    let mut key_metadata = BTreeMap::new();
+    for column in &policy.row_policy.columns {
+        let CrossDialectTargetType::MySql(target_type) = &column.target_type else {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "MySQL conversion contract contains a non-MySQL column".into(),
+            ));
+        };
+        if columns
+            .insert(column.target.name.as_str().into(), column.target.clone())
+            .is_some()
+        {
+            return Err(MySqlPlanError::InvalidCatalog(
+                "MySQL conversion contract has duplicate target columns".into(),
+            ));
+        }
+        if policy
+            .resumable_key
+            .target_columns
+            .contains(&column.target.name)
+        {
+            key_metadata.insert(
+                column.target.name.clone(),
+                (
+                    target_type.ddl_type()?,
+                    target_type
+                        .character_set_and_collation()
+                        .map(|(_, collation)| collation.as_str().to_owned()),
+                ),
+            );
+        }
+    }
+    let key_metadata = policy
+        .resumable_key
+        .target_columns
+        .iter()
+        .map(|column| {
+            key_metadata.get(column).cloned().ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog(
+                    "MySQL conversion key does not resolve to every target column".into(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (column_types, collations) = key_metadata.into_iter().unzip();
+    Ok(TableContract {
+        columns,
+        key: MySqlResumableKey {
+            index_name: policy
+                .resumable_key
+                .target_name
+                .clone()
+                .unwrap_or(Identifier::new("PRIMARY")?),
+            primary: policy.resumable_key.target_kind == CrossDialectKeyKind::PrimaryKey,
+            columns: policy.resumable_key.target_columns.clone(),
+            column_types,
+            collations,
+            server_version: evidence.server_version.clone(),
+        },
+    })
+}
+
+fn mysql_conversion_checks_are_exact(
+    namespace: &CatalogNamespace,
+    policy: &TableConversionPolicy,
+) -> ConnectionResult<bool> {
+    let mut expected = policy
+        .row_policy
+        .columns
+        .iter()
+        .flat_map(|column| {
+            let quoted = quote_identifier(&column.target.name);
+            column.target_checks.iter().map(move |check| {
+                render_mysql_conversion_check(&quoted, check)
+                    .map(|clause| canonical_mysql_check_clause(&clause))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+    let mut observed = namespace
+        .objects
+        .iter()
+        .filter(|object| {
+            object.kind == CatalogObjectKind::CheckConstraint
+                && object
+                    .attributes
+                    .get("table_name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(policy.target_table.name.as_str())
+        })
+        .map(|object| {
+            if object
+                .attributes
+                .get("enforced")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "MySQL target CHECK {} is not enforced",
+                    object.name
+                )));
+            }
+            object
+                .attributes
+                .get("check_clause")
+                .and_then(serde_json::Value::as_str)
+                .map(canonical_mysql_check_clause)
+                .ok_or_else(|| {
+                    ConnectionError::InvalidRequest(format!(
+                        "MySQL target CHECK {} has no clause",
+                        object.name
+                    ))
+                })
+        })
+        .collect::<ConnectionResult<Vec<_>>>()?;
+    expected.sort();
+    observed.sort();
+    Ok(expected == observed)
+}
+
+fn canonical_mysql_check_clause(clause: &str) -> String {
+    let mut clause = clause.trim();
+    while let Some(inner) = clause
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        if !parentheses_wrap_entire_mysql_clause(clause) {
+            break;
+        }
+        clause = inner.trim();
+    }
+    let mut canonical = String::with_capacity(clause.len());
+    let mut bytes = clause.bytes().peekable();
+    let mut quote = None;
+    while let Some(byte) = bytes.next() {
+        if let Some(quoted) = quote {
+            canonical.push(char::from(byte));
+            if byte == quoted {
+                if bytes.peek() == Some(&quoted) {
+                    if let Some(escaped) = bytes.next() {
+                        canonical.push(char::from(escaped));
+                    }
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'`' => {
+                quote = Some(byte);
+                canonical.push(char::from(byte));
+            }
+            byte if byte.is_ascii_whitespace() => {}
+            byte => canonical.push(char::from(byte.to_ascii_lowercase())),
+        }
+    }
+    canonical
+}
+
+fn parentheses_wrap_entire_mysql_clause(clause: &str) -> bool {
+    let mut depth = 0_u32;
+    let mut quote = None;
+    let bytes = clause.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(quoted) = quote {
+            if byte == quoted {
+                if bytes.get(index + 1) == Some(&quoted) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'`' => quote = Some(byte),
+            b'(' => depth += 1,
+            b')' => {
+                depth = match depth.checked_sub(1) {
+                    Some(depth) => depth,
+                    None => return false,
+                };
+                if depth == 0 && index + 1 != bytes.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    depth == 0 && quote.is_none()
 }
 
 fn render_mysql_conversion_check(
@@ -7538,6 +7956,103 @@ mod tests {
                 ("lower_case_table_names".into(), "0".into()),
             ]),
         }
+    }
+
+    fn postgres_to_mysql_policy() -> TableConversionPolicy {
+        let source = ColumnMeta {
+            name: identifier("id"),
+            ordinal: 1,
+            vendor_type: "pg_catalog.int8".into(),
+            nullable: false,
+            collation: None,
+            precision: None,
+            scale: None,
+            timezone_semantics: None,
+        };
+        let target_type = CrossDialectTargetType::MySql(MySqlTargetType::Integer {
+            width: MySqlIntegerWidth::Big,
+            unsigned: false,
+        });
+        TableConversionPolicy {
+            source_table: QualifiedTable {
+                namespace: identifier("public"),
+                name: identifier("items"),
+            },
+            target_table: QualifiedTable {
+                namespace: identifier("app"),
+                name: identifier("items"),
+            },
+            target_contract: CrossDialectTargetTableContract::MySql {
+                engine: MySqlTargetEngine::InnoDb,
+                character_set: identifier("utf8mb4"),
+                collation: identifier("utf8mb4_0900_bin"),
+            },
+            resumable_key: CrossDialectResumableKey {
+                source_name: identifier("items_pkey"),
+                source_kind: CrossDialectKeyKind::PrimaryKey,
+                source_columns: vec![identifier("id")],
+                target_name: None,
+                target_kind: CrossDialectKeyKind::PrimaryKey,
+                target_columns: vec![identifier("id")],
+            },
+            row_policy: RowConversionPolicy {
+                schema_version: ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+                source_dialect: ConversionDialect::PostgreSql,
+                target_dialect: ConversionDialect::MySql,
+                columns: vec![super::super::conversion::ColumnConversion {
+                    source,
+                    source_type: super::super::conversion::CrossDialectSourceType::PostgreSql(
+                        super::super::conversion::PostgresTargetType::BigInt,
+                    ),
+                    target: target_type.column_meta(identifier("id"), 1, false).unwrap(),
+                    target_type,
+                    target_checks: Vec::new(),
+                    rule: super::super::conversion::ValueConversionRule::SignedInteger {
+                        minimum: i64::MIN,
+                        maximum: i64::MAX,
+                    },
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn cross_dialect_target_policy_drives_writer_verifier_and_ddl_contracts() {
+        let policy = postgres_to_mysql_policy();
+        policy.validate().unwrap();
+        let evidence = snapshot("mysql://target/app", false).snapshot_evidence;
+        let definition = mysql_conversion_table_definition(&policy).unwrap();
+        let contract = mysql_conversion_table_contract(&policy, &evidence).unwrap();
+
+        assert_eq!(definition.table, policy.target_table);
+        assert_eq!(
+            definition.columns[0].data_type,
+            MySqlColumnType::Integer {
+                name: "bigint".into(),
+                unsigned: false,
+                display_width: None,
+            }
+        );
+        assert_eq!(definition.indexes[0].name, identifier("PRIMARY"));
+        assert_eq!(contract.columns["id"], policy.row_policy.columns[0].target);
+        assert_eq!(contract.key.columns, vec![identifier("id")]);
+        assert_eq!(contract.key.column_types, vec!["bigint"]);
+        assert!(mysql_conversion_checks_are_exact(
+            &CatalogNamespace {
+                id: "namespace:app".into(),
+                name: identifier("app"),
+                owner: None,
+                charset: Some("utf8mb4".into()),
+                collation: Some("utf8mb4_0900_bin".into()),
+                objects: Vec::new(),
+            },
+            &policy,
+        )
+        .unwrap());
+        assert_eq!(
+            canonical_mysql_check_clause(" (((`a``(b` BETWEEN 0 AND 7))) "),
+            "`a``(b`between0and7"
+        );
     }
 
     fn snapshot(endpoint: &str, with_table: bool) -> MySqlCatalogSnapshot {

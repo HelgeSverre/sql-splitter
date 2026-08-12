@@ -1500,6 +1500,108 @@ pub struct PostgresTargetFactory {
     config: PostgresEndpointConfig,
     cancel_registry: Arc<CancelRegistry>,
     cancellation: CancellationToken,
+    cross_conversion_tables: BTreeMap<QualifiedTable, TableConversionPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresConversionTableState {
+    Absent,
+    Exact,
+    Different,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PostgresConversionTableSignature {
+    owner: String,
+    acl_is_null: bool,
+    row_security: bool,
+    force_row_security: bool,
+    reloptions: Option<String>,
+    tablespace: Option<String>,
+    columns: Vec<String>,
+    constraints: Vec<String>,
+    indexes: Vec<String>,
+}
+
+fn postgres_conversion_shadow_name(policy: &TableConversionPolicy) -> ConnectionResult<Identifier> {
+    let bytes = serde_json::to_vec(policy)
+        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+    Identifier::new(format!(
+        "sqlspl_shadow_{}",
+        &hex::encode(Sha256::digest(bytes))[..32]
+    ))
+    .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))
+}
+
+fn postgres_relation_identity(
+    client: &mut impl postgres::GenericClient,
+    table: &QualifiedTable,
+) -> ConnectionResult<Option<(u32, String)>> {
+    let rows = client
+        .query(
+            "SELECT c.oid, c.relkind::text, c.relpersistence::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2",
+            &[&table.namespace.as_str(), &table.name.as_str()],
+        )
+        .map_err(database_error)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    if rows.len() != 1 || rows[0].get::<_, String>(1) != "r" {
+        return Err(ConnectionError::InvalidRequest(format!(
+            "PostgreSQL target name {}.{} is occupied by a different relation kind",
+            table.namespace, table.name
+        )));
+    }
+    Ok(Some((rows[0].get(0), rows[0].get(2))))
+}
+
+fn postgres_conversion_table_signature(
+    client: &mut impl postgres::GenericClient,
+    table_oid: u32,
+) -> ConnectionResult<PostgresConversionTableSignature> {
+    let relation = client
+        .query_one(
+            "SELECT r.rolname, c.relacl IS NULL, c.relrowsecurity, c.relforcerowsecurity, c.reloptions::text, ts.spcname FROM pg_class c JOIN pg_roles r ON r.oid=c.relowner LEFT JOIN pg_tablespace ts ON ts.oid=c.reltablespace WHERE c.oid=$1",
+            &[&table_oid],
+        )
+        .map_err(database_error)?;
+    let columns = postgres_json_signature_rows(
+        client,
+        table_oid,
+        "SELECT jsonb_build_object('name',a.attname,'ordinal',a.attnum,'type',pg_catalog.format_type(a.atttypid,a.atttypmod),'not_null',a.attnotnull,'identity',a.attidentity::text,'generated',a.attgenerated::text,'collation_schema',cn.nspname,'collation',coll.collname,'default',pg_get_expr(ad.adbin,ad.adrelid,false))::text FROM pg_attribute a LEFT JOIN pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum LEFT JOIN pg_collation coll ON coll.oid=a.attcollation LEFT JOIN pg_namespace cn ON cn.oid=coll.collnamespace WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
+    )?;
+    let constraints = postgres_json_signature_rows(
+        client,
+        table_oid,
+        "SELECT jsonb_build_object('type',con.contype::text,'deferrable',con.condeferrable,'deferred',con.condeferred,'validated',con.convalidated,'definition',pg_get_constraintdef(con.oid,false))::text FROM pg_constraint con WHERE con.conrelid=$1 ORDER BY con.contype,pg_get_constraintdef(con.oid,false)",
+    )?;
+    let indexes = postgres_json_signature_rows(
+        client,
+        table_oid,
+        "SELECT jsonb_build_object('unique',i.indisunique,'primary',i.indisprimary,'valid',i.indisvalid,'ready',i.indisready,'live',i.indislive,'immediate',i.indimmediate,'nulls_not_distinct',i.indnullsnotdistinct,'access_method',am.amname,'predicate',pg_get_expr(i.indpred,i.indrelid,false),'expressions',pg_get_expr(i.indexprs,i.indrelid,false),'key_count',i.indnkeyatts,'attribute_count',i.indnatts,'columns',(SELECT jsonb_agg(a.attname ORDER BY keys.ordinality) FROM unnest(i.indkey::smallint[]) WITH ORDINALITY keys(attnum,ordinality) LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=keys.attnum),'options',to_jsonb(i.indoption::smallint[]),'opclasses',(SELECT jsonb_agg(jsonb_build_array(n.nspname,op.opcname) ORDER BY classes.ordinality) FROM unnest(i.indclass::oid[]) WITH ORDINALITY classes(opclass_oid,ordinality) JOIN pg_opclass op ON op.oid=classes.opclass_oid JOIN pg_namespace n ON n.oid=op.opcnamespace),'collations',(SELECT jsonb_agg(CASE WHEN values.collation_oid=0 THEN NULL ELSE jsonb_build_array(n.nspname,c.collname) END ORDER BY values.ordinality) FROM unnest(i.indcollation::oid[]) WITH ORDINALITY values(collation_oid,ordinality) LEFT JOIN pg_collation c ON c.oid=values.collation_oid LEFT JOIN pg_namespace n ON n.oid=c.collnamespace))::text FROM pg_index i JOIN pg_class ci ON ci.oid=i.indexrelid JOIN pg_am am ON am.oid=ci.relam WHERE i.indrelid=$1 ORDER BY i.indisprimary DESC,i.indisunique DESC,ci.relname",
+    )?;
+    Ok(PostgresConversionTableSignature {
+        owner: relation.get(0),
+        acl_is_null: relation.get(1),
+        row_security: relation.get(2),
+        force_row_security: relation.get(3),
+        reloptions: relation.get(4),
+        tablespace: relation.get(5),
+        columns,
+        constraints,
+        indexes,
+    })
+}
+
+fn postgres_json_signature_rows(
+    client: &mut impl postgres::GenericClient,
+    table_oid: u32,
+    sql: &str,
+) -> ConnectionResult<Vec<String>> {
+    client
+        .query(sql, &[&table_oid])
+        .map_err(database_error)
+        .map(|rows| rows.into_iter().map(|row| row.get(0)).collect())
 }
 
 impl PostgresTargetFactory {
@@ -1515,7 +1617,54 @@ impl PostgresTargetFactory {
             config,
             cancel_registry: Arc::default(),
             cancellation,
+            cross_conversion_tables: BTreeMap::new(),
         }
+    }
+
+    /// Construct a PostgreSQL target bound to reviewed MySQL-to-PostgreSQL
+    /// table conversion policies.
+    pub fn new_cross_dialect_with_cancellation(
+        config: PostgresEndpointConfig,
+        reviewed_target_catalog: &VendorCatalog,
+        policies: Vec<TableConversionPolicy>,
+        cancellation: CancellationToken,
+    ) -> Result<Self, PostgresPlanError> {
+        config.validate()?;
+        if reviewed_target_catalog.dialect != "postgresql"
+            || reviewed_target_catalog.database.as_str() != config.database
+        {
+            return Err(PostgresPlanError::InvalidConfig(
+                "cross-dialect PostgreSQL target catalog has the wrong dialect or database",
+            ));
+        }
+        let mut cross_conversion_tables = BTreeMap::new();
+        for policy in policies {
+            policy.validate()?;
+            if policy.row_policy.target_dialect != ConversionDialect::PostgreSql
+                || policy.target_table.namespace.as_str() == "pg_temp"
+            {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "cross-dialect policy does not target an allowed PostgreSQL namespace",
+                ));
+            }
+            let table = policy.target_table.clone();
+            if cross_conversion_tables.insert(table, policy).is_some() {
+                return Err(PostgresPlanError::InvalidConfig(
+                    "cross-dialect target contains a duplicate table policy",
+                ));
+            }
+        }
+        if cross_conversion_tables.is_empty() {
+            return Err(PostgresPlanError::InvalidConfig(
+                "cross-dialect PostgreSQL target has no reviewed table policies",
+            ));
+        }
+        Ok(Self {
+            config,
+            cancel_registry: Arc::default(),
+            cancellation,
+            cross_conversion_tables,
+        })
     }
 
     fn controlled_connect(&self) -> ConnectionResult<(Client, SessionRegistration<CancelToken>)> {
@@ -1570,6 +1719,102 @@ impl PostgresTargetFactory {
         }
         transaction.commit().map_err(database_error)?;
         self.cancellation.check()
+    }
+
+    /// Inspect one MySQL-to-PostgreSQL table against the exact semantic result
+    /// of the reviewed typed DDL on this server. A transaction-local shadow
+    /// table lets PostgreSQL normalize types, constraints, and indexes through
+    /// the same catalog implementation without trusting source SQL text.
+    pub fn inspect_conversion_table(
+        &self,
+        policy: &TableConversionPolicy,
+    ) -> ConnectionResult<PostgresConversionTableState> {
+        if self.cross_conversion_tables.get(&policy.target_table) != Some(policy) {
+            return Err(ConnectionError::InvalidRequest(
+                "PostgreSQL conversion table policy differs from the reviewed target contract"
+                    .into(),
+            ));
+        }
+        let (mut client, _registration) = self.controlled_connect()?;
+        let actual_identity = postgres_relation_identity(&mut client, &policy.target_table)?;
+        let Some((actual_oid, actual_persistence)) = actual_identity else {
+            return Ok(PostgresConversionTableState::Absent);
+        };
+        if actual_persistence != "p" {
+            return Ok(PostgresConversionTableState::Different);
+        }
+        let actual_signature = match postgres_conversion_table_signature(&mut client, actual_oid) {
+            Ok(signature) => signature,
+            Err(ConnectionError::InvalidRequest(_)) => {
+                return Ok(PostgresConversionTableState::Different);
+            }
+            Err(error) => return Err(error),
+        };
+        let mut transaction = client.transaction().map_err(database_error)?;
+        let shadow_name = postgres_conversion_shadow_name(policy)?;
+        let mut shadow_policy = policy.clone();
+        shadow_policy.target_table = QualifiedTable {
+            namespace: Identifier::new("pg_temp")
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+            name: shadow_name,
+        };
+        let ddl = render_postgres_conversion_create_table(&shadow_policy)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        transaction.batch_execute(&ddl).map_err(database_error)?;
+        let (shadow_oid, shadow_persistence) = postgres_relation_identity(
+            &mut transaction,
+            &shadow_policy.target_table,
+        )?
+        .ok_or_else(|| {
+            ConnectionError::Database("PostgreSQL conversion shadow table was not cataloged".into())
+        })?;
+        if shadow_persistence != "t" {
+            return Err(ConnectionError::Database(
+                "PostgreSQL conversion shadow table is not temporary".into(),
+            ));
+        }
+        let shadow_signature = postgres_conversion_table_signature(&mut transaction, shadow_oid)?;
+        transaction.rollback().map_err(database_error)?;
+        self.cancellation.check()?;
+        Ok(if actual_signature == shadow_signature {
+            PostgresConversionTableState::Exact
+        } else {
+            PostgresConversionTableState::Different
+        })
+    }
+
+    /// Apply one transactional create-only cross-dialect target-table effect.
+    /// The caller must persist Prepared before this method begins.
+    pub fn create_conversion_table(&self, policy: &TableConversionPolicy) -> ConnectionResult<()> {
+        match self.inspect_conversion_table(policy)? {
+            PostgresConversionTableState::Absent => {}
+            PostgresConversionTableState::Exact | PostgresConversionTableState::Different => {
+                return Err(ConnectionError::InvalidRequest(
+                    "PostgreSQL cross-dialect create-only target is not absent".into(),
+                ));
+            }
+        }
+        let ddl = render_postgres_conversion_create_table(policy)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let (mut client, _registration) = self.controlled_connect()?;
+        let mut transaction = client.transaction().map_err(database_error)?;
+        if let Err(error) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(error);
+        }
+        transaction.batch_execute(&ddl).map_err(database_error)?;
+        if let Err(error) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(error);
+        }
+        transaction.commit().map_err(database_error)?;
+        if self.inspect_conversion_table(policy)? != PostgresConversionTableState::Exact {
+            return Err(ConnectionError::Database(
+                "PostgreSQL CREATE TABLE committed without the exact reviewed conversion effect"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Inspect the exact configuration and current state of one PostgreSQL sequence.
