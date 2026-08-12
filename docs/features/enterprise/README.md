@@ -56,9 +56,13 @@
 > strict no-skip, and complete-target-coverage matrices also pass on both
 > versions. The TLS/redaction matrix proves authenticated and explicitly
 > insecure modes, negative hostname/CA/client cases, hostile identifiers,
-> protected artifacts, and safe diagnostics. The remaining Phase 6 exit gate
-> in [08](./08-implementation-prerequisites.md) is still open, so this is not
-> the Phase 6 exit or a production support statement.
+> protected artifacts, and safe diagnostics. A reviewed injective account
+> mapping now restores static and dynamic privileges, role edges and defaults,
+> proxy grants, grant options, and partial revokes only after strict schema and
+> row verification. Phase 6 met its spike-level exit on 2026-08-12; see
+> [08](./08-implementation-prerequisites.md). This is not a production support
+> statement. The large-dataset two-instance real-engine gate and the MySQL
+> managed-provider freeze-profile matrix remain open.
 
 ## Status and product boundary
 

@@ -209,10 +209,29 @@ MySQL 8.0 and 8.4, rather than deferred:
    target-only rows before the first source key, between committed intervals,
    after the final key, and in a source-empty table, plus an extra target
    table.
-6. **Business-authorization restoration:** the already-inventoried grants,
-   roles, and partial revokes must be *mapped and restored*, not merely
-   inventoried and blocked. Inventory-and-block is not a faithful
-   same-dialect migration for ordinary business schemas.
+6. **Business-authorization restoration (met 2026-08-12):** a reviewed
+   injective source→target account mapping restores static, dynamic, proxy,
+   role-edge, default-role, and partial-revoke authorization (mapped and
+   restored, not inventoried-and-blocked); plan validation requires zero
+   residual privilege blockers when a mapping is present. Restoration runs
+   only in the verification phase after data, `AUTO_INCREMENT`, foreign
+   keys, rows, and exact schema verify; privilege tokens use closed
+   allowlists or a strict dynamic grammar; no authentication material is
+   ever modeled or emitted; unrelated target accounts stay byte-exact; and
+   the MySQL 8.0/8.4 live matrix proves implicit-commit recovery at every
+   boundary. Commit `defa457`, review [079].
+
+**Phase 6 exit: met at spike level on 2026-08-12** (commits `9fcd8f2`
+through `defa457`; reviews [031]–[079]). All six exit items above passed on
+the disposable MySQL 8.0 and 8.4 two-container TLS matrices, alongside
+catalog/visibility, freeze, execute/resume, canonical values, recovery,
+cancellation, network COMMIT ambiguity, drift, and freeze-loss. This is
+spike evidence within the feature-gated command, not a production support
+statement. The higher real-engine acceptance bar — a large-dataset,
+two-instance migration against real managed databases — remains owed
+separately (mailbox [078]) and is not claimed here. The MySQL freeze
+profile also still owes its own real-provider matrix, exactly as the
+PostgreSQL managed-administrator execution matrix does.
 
 **Support-boundary decision (not a deferral of correctness):** in the first
 MySQL support subset, routines, triggers, events, views, partitions,
