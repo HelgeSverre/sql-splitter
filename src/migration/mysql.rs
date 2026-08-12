@@ -6075,10 +6075,10 @@ fn mysql_foreign_key_action_sql(action: MySqlForeignKeyAction) -> &'static str {
 fn column_meta(object: &CatalogObject) -> Result<ColumnMeta, MySqlPlanError> {
     let ordinal = required_u64(object, "ordinal")?;
     let data_type = required_text(object, "data_type")?;
-    let precision = if matches!(data_type, "datetime" | "timestamp" | "time") {
-        optional_u64(object, "datetime_precision")
-    } else {
-        optional_u64(object, "numeric_precision")
+    let precision = match data_type {
+        "decimal" | "numeric" => optional_u64(object, "numeric_precision"),
+        "datetime" | "timestamp" | "time" => optional_u64(object, "datetime_precision"),
+        _ => None,
     };
     Ok(ColumnMeta {
         name: object.name.clone(),
@@ -6091,10 +6091,14 @@ fn column_meta(object: &CatalogObject) -> Result<ColumnMeta, MySqlPlanError> {
             .map(u32::try_from)
             .transpose()
             .map_err(|_| MySqlPlanError::InvalidCatalog("column precision is too large".into()))?,
-        scale: optional_i64(object, "numeric_scale")
-            .map(i32::try_from)
-            .transpose()
-            .map_err(|_| MySqlPlanError::InvalidCatalog("column scale is too large".into()))?,
+        scale: if matches!(data_type, "decimal" | "numeric") {
+            optional_i64(object, "numeric_scale")
+        } else {
+            None
+        }
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| MySqlPlanError::InvalidCatalog("column scale is too large".into()))?,
         timezone_semantics: match data_type {
             "timestamp" => Some("mysql_session_time_zone".into()),
             "datetime" => Some("local_without_offset".into()),
@@ -9224,6 +9228,29 @@ mod tests {
             meta.timezone_semantics.as_deref(),
             Some("mysql_session_time_zone")
         );
+    }
+
+    #[test]
+    fn integer_column_meta_does_not_treat_display_precision_as_value_metadata() {
+        let object = CatalogObject {
+            id: "column:app:items:id".into(),
+            kind: CatalogObjectKind::Column,
+            name: identifier("id"),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([
+                ("ordinal".into(), serde_json::json!(1)),
+                ("data_type".into(), serde_json::json!("bigint")),
+                ("nullable".into(), serde_json::json!(false)),
+                ("collation".into(), serde_json::Value::Null),
+                ("numeric_precision".into(), serde_json::json!(19)),
+                ("numeric_scale".into(), serde_json::json!(0)),
+                ("datetime_precision".into(), serde_json::Value::Null),
+            ]),
+        };
+
+        let meta = column_meta(&object).unwrap();
+        assert_eq!(meta.precision, None);
+        assert_eq!(meta.scale, None);
     }
 
     #[test]

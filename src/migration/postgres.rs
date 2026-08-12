@@ -628,16 +628,18 @@ fn postgres_conversion_column_meta(
         ));
     }
     let data_type = format!("{type_schema}.{type_name}");
-    let temporal = matches!(type_name, "time" | "timetz" | "timestamp" | "timestamptz");
-    let precision = optional_catalog_u32(
-        object,
-        if temporal {
-            "datetime_precision"
-        } else {
-            "numeric_precision"
-        },
-    )?;
-    let scale = optional_catalog_i32(object, "numeric_scale")?;
+    let precision = match type_name {
+        "numeric" => optional_catalog_u32(object, "numeric_precision")?,
+        "time" | "timetz" | "timestamp" | "timestamptz" => {
+            optional_catalog_u32(object, "datetime_precision")?
+        }
+        _ => None,
+    };
+    let scale = if type_name == "numeric" {
+        optional_catalog_i32(object, "numeric_scale")?
+    } else {
+        None
+    };
     let collation = match (
         object.attributes.get("collation_schema"),
         object.attributes.get("collation"),
@@ -5610,7 +5612,7 @@ fn load_projection_metadata(
 ) -> ConnectionResult<Vec<ColumnMeta>> {
     let rows = client
         .query(
-            "SELECT column_name, ordinal_position::integer, udt_schema || '.' || udt_name, is_nullable = 'YES', collation_name, numeric_precision::integer, numeric_scale::integer, datetime_precision::integer, data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position",
+            "SELECT cols.column_name, cols.ordinal_position::integer, cols.udt_schema || '.' || cols.udt_name, cols.is_nullable = 'YES', coll_nsp.nspname || '.' || coll.collname, cols.numeric_precision::integer, cols.numeric_scale::integer, cols.datetime_precision::integer, cols.data_type FROM information_schema.columns cols JOIN pg_namespace table_nsp ON table_nsp.nspname = cols.table_schema JOIN pg_class rel ON rel.relnamespace = table_nsp.oid AND rel.relname = cols.table_name JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attname = cols.column_name AND NOT att.attisdropped LEFT JOIN pg_collation coll ON coll.oid = att.attcollation LEFT JOIN pg_namespace coll_nsp ON coll_nsp.oid = coll.collnamespace WHERE cols.table_schema = $1 AND cols.table_name = $2 ORDER BY cols.ordinal_position",
             &[&table.namespace.as_str(), &table.name.as_str()],
         )
         .map_err(database_error)?;
@@ -5630,24 +5632,22 @@ fn load_projection_metadata(
                 vendor_type: row.get(2),
                 nullable: row.get(3),
                 collation: row.get(4),
-                precision: row
-                    .get::<_, Option<i32>>(
-                        if matches!(
-                            data_type.as_str(),
-                            "timestamp with time zone"
-                                | "time with time zone"
-                                | "timestamp without time zone"
-                                | "time without time zone"
-                        ) {
-                            7
-                        } else {
-                            5
-                        },
-                    )
-                    .map(u32::try_from)
-                    .transpose()
-                    .map_err(|_| ConnectionError::Database("negative numeric precision".into()))?,
-                scale: row.get(6),
+                precision: match data_type.as_str() {
+                    "numeric" => row.get::<_, Option<i32>>(5),
+                    "timestamp with time zone"
+                    | "time with time zone"
+                    | "timestamp without time zone"
+                    | "time without time zone" => row.get::<_, Option<i32>>(7),
+                    _ => None,
+                }
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| ConnectionError::Database("negative numeric precision".into()))?,
+                scale: if data_type == "numeric" {
+                    row.get(6)
+                } else {
+                    None
+                },
                 timezone_semantics: match data_type.as_str() {
                     "timestamp with time zone" | "time with time zone" => {
                         Some("with_time_zone".into())
@@ -9208,6 +9208,9 @@ mod tests {
                 ]),
             },
         ]);
+        catalog.namespaces[0].objects[1]
+            .attributes
+            .insert("numeric_precision".into(), serde_json::json!(64));
 
         let policy = postgres_to_mysql_table_conversion_policy(
             &catalog,

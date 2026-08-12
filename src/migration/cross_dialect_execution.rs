@@ -559,6 +559,7 @@ pub fn execute_postgres_to_mysql_plan(
     attest_current_cross_mysql_target_binding(&reviewed, &target_config, &target_metadata_config)?;
     require_source_consistency()?;
     cancellation.check()?;
+    drop(reader);
     release_cross_postgres_fence(&fence_admin, &installed)?;
     journal.transition_status(MigrationStatus::CompletedWithApprovedTransformations)?;
     cross_report(state_path.as_ref(), &journal)
@@ -666,6 +667,7 @@ pub fn resume_postgres_to_mysql_plan(
     attest_current_cross_mysql_target_binding(&reviewed, &target_config, &target_metadata_config)?;
     require_source_consistency()?;
     cancellation.check()?;
+    drop(reader);
     release_cross_postgres_fence(&fence_admin, &installed)?;
     journal.transition_status(MigrationStatus::CompletedWithApprovedTransformations)?;
     cross_report(state_path.as_ref(), &journal)
@@ -1700,7 +1702,7 @@ fn copy_cross_tables(
                 if source_batch.is_empty() {
                     break;
                 }
-                let target_batch = contract.policy.convert_batch(&source_batch)?;
+                let target_batch = convert_cross_batch(contract, &source_batch)?;
                 let final_key = batch_key(&source_batch, &contract.source_key_indexes)?;
                 let chunk_id = journal
                     .projection()
@@ -1757,7 +1759,7 @@ fn reconcile_prepared_cross_chunk(
         prepared.start_key.clone().map(KeyTuple::new),
         limit,
     ))?;
-    let target_batch = contract.policy.convert_batch(&source_batch)?;
+    let target_batch = convert_cross_batch(contract, &source_batch)?;
     if target_batch.len() as u64 != prepared.row_count
         || batch_key(&source_batch, &contract.source_key_indexes)?.0 != prepared.final_key
         || converted_batch_digest(contract, &target_batch)? != prepared.canonical_digest
@@ -2000,7 +2002,7 @@ fn verify_cross_table(
         let limit = u32::try_from(chunk.row_count)?;
         let source_batch =
             reader.select_page(&source_page(contract, source_after.clone(), limit))?;
-        let expected = contract.policy.convert_batch(&source_batch)?;
+        let expected = convert_cross_batch(contract, &source_batch)?;
         let target_batch =
             verifier.select_page(&target_page(contract, target_after.clone(), limit))?;
         let expected_target_final = contract.policy.convert_source_key(&chunk.final_key)?;
@@ -2049,6 +2051,27 @@ fn source_page(contract: &CrossCopyContract, after: Option<KeyTuple>, limit: u32
         after,
         limit,
     }
+}
+
+fn convert_cross_batch(
+    contract: &CrossCopyContract,
+    source: &RowBatch,
+) -> anyhow::Result<RowBatch> {
+    contract.policy.convert_batch(source).with_context(|| {
+        format!(
+            "convert source columns for {}.{}; reviewed metadata: {:?}; observed metadata: {:?}",
+            contract.policy.source_table.namespace,
+            contract.policy.source_table.name,
+            contract
+                .policy
+                .row_policy
+                .columns
+                .iter()
+                .map(|column| &column.source)
+                .collect::<Vec<_>>(),
+            source.columns()
+        )
+    })
 }
 
 fn cross_page_limit(configured_rows: usize) -> anyhow::Result<u32> {
