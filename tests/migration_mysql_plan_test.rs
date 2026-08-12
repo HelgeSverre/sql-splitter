@@ -61,7 +61,9 @@ use sql_splitter::migration::mysql_profile::{
 use sql_splitter::migration::mysql_visibility::{
     MySqlGrantRecord, MySqlOperationalAccountPurpose, MySqlProxyTarget,
 };
-use sql_splitter::migration::plan::{OperationKind, ReviewedPlan, UnsupportedObjectCode};
+use sql_splitter::migration::plan::{
+    OperationKind, ReviewedPlan, UnsupportedObjectCode, POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
+};
 
 fn required_path(name: &str) -> anyhow::Result<PathBuf> {
     std::env::var_os(name)
@@ -1104,7 +1106,7 @@ fn live_mysql_drift_rejection_matrix() -> anyhow::Result<()> {
     assert!(!stale_tool_journal.exists());
 
     let mut wrong_policy = reviewed.plan.clone();
-    wrong_policy.conversion_policy = "different-policy".into();
+    wrong_policy.conversion_policy = POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY;
     assert!(ReviewedPlan::new(wrong_policy).is_err());
 
     let mut operation_tamper = reviewed.clone();

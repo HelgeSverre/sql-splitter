@@ -1256,6 +1256,11 @@ where
                     "MySQL migration journal is in a terminal non-success state"
                 ));
             }
+            MigrationStatus::CompletedWithApprovedTransformations => {
+                return Err(anyhow!(
+                    "same-dialect MySQL migration has an invalid transformed completion state"
+                ));
+            }
             MigrationStatus::Running | MigrationStatus::Verifying | MigrationStatus::Completed => {}
         }
 
@@ -3419,7 +3424,7 @@ mod tests {
             target_tls_binding: AssessmentStatus::Assessed(target_tls_binding),
             consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-            conversion_policy: MYSQL_SAME_DIALECT_CONVERSION_POLICY.into(),
+            conversion_policy: MYSQL_SAME_DIALECT_CONVERSION_POLICY,
             outage_policy: None,
             postgres_source_profile: None,
             mysql_source_profile: Some(
@@ -4082,7 +4087,8 @@ mod tests {
                 ..binding.clone()
             },
             ResumeBinding {
-                conversion_policy: "different-policy".into(),
+                conversion_policy:
+                    crate::migration::plan::POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
                 ..binding.clone()
             },
             ResumeBinding {

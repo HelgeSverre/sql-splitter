@@ -6,6 +6,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::canonical::CANONICAL_ENCODING_VERSION;
+use super::conversion::{
+    ConversionDialect, MigrationConversionMode, MigrationConversionPolicy, RowConversionError,
+};
 use super::model::{QualifiedTable, VendorCatalog};
 use super::mysql_profile::{MySqlFreezeProfileContract, MySqlFreezeProfileError};
 use super::mysql_visibility::{
@@ -15,8 +18,13 @@ use super::mysql_visibility::{
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 12;
-pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: &str = "mysql_same_dialect_exact";
+pub const PLAN_SCHEMA_VERSION: u16 = 13;
+pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
+    MigrationConversionPolicy::same_dialect_exact(ConversionDialect::MySql);
+pub const POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
+    MigrationConversionPolicy::same_dialect_exact(ConversionDialect::PostgreSql);
+pub const POSTGRESQL_ASSESSMENT_CONVERSION_POLICY: MigrationConversionPolicy =
+    MigrationConversionPolicy::assessment_source_only(ConversionDialect::PostgreSql);
 pub const MYSQL_STRICT_SQL_MODE: &str =
     "NO_AUTO_VALUE_ON_ZERO,STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION";
 pub const MYSQL_SESSION_CHARACTER_SET: &str = "utf8mb4";
@@ -314,7 +322,7 @@ pub struct MigrationPlan {
     pub target_tls_binding: AssessmentStatus<String>,
     pub consistency_mode: String,
     pub canonical_encoding_version: u16,
-    pub conversion_policy: String,
+    pub conversion_policy: MigrationConversionPolicy,
     #[serde(default)]
     pub outage_policy: Option<ReviewedOutagePolicy>,
     #[serde(default)]
@@ -357,7 +365,6 @@ impl MigrationPlan {
                 &self.source_catalog_fingerprint,
             ),
             ("source_tls_binding", &self.source_tls_binding),
-            ("conversion_policy", &self.conversion_policy),
         ] {
             if value.is_empty() {
                 return Err(PlanError::EmptyField { field });
@@ -369,6 +376,10 @@ impl MigrationPlan {
             .ok_or(PlanError::MissingEvidence {
                 field: "source_catalog",
             })?;
+        self.conversion_policy.validate()?;
+        if self.conversion_policy.source_dialect().catalog_name() != source_catalog.dialect {
+            return Err(PlanError::InvalidConversionPolicy);
+        }
         validate_catalog_fingerprint(
             "source_catalog_fingerprint",
             source_catalog,
@@ -406,12 +417,35 @@ impl MigrationPlan {
         }
         if self.purpose == PlanPurpose::Execution {
             require_execution_target(self)?;
+            if matches!(
+                &self.conversion_policy.mode,
+                MigrationConversionMode::AssessmentSourceOnly { .. }
+            ) {
+                return Err(PlanError::InvalidConversionPolicy);
+            }
+            let target_catalog = self
+                .target_catalog
+                .as_assessed()
+                .ok_or(PlanError::InvalidConversionPolicy)?;
+            if self
+                .conversion_policy
+                .target_dialect()
+                .is_none_or(|dialect| dialect.catalog_name() != target_catalog.dialect)
+            {
+                return Err(PlanError::InvalidConversionPolicy);
+            }
             if self.consistency_mode.is_empty() {
                 return Err(PlanError::EmptyField {
                     field: "consistency_mode",
                 });
             }
         } else {
+            if !matches!(
+                &self.conversion_policy.mode,
+                MigrationConversionMode::AssessmentSourceOnly { .. }
+            ) {
+                return Err(PlanError::InvalidConversionPolicy);
+            }
             if self.outage_policy.is_some() {
                 return Err(PlanError::AssessmentContainsOutagePolicy);
             }
@@ -623,6 +657,7 @@ impl MigrationPlan {
                 }
             }
         }
+        validate_operation_conversion_bindings(self)?;
         detect_cycle(&self.operations)?;
         Ok(())
     }
@@ -667,6 +702,54 @@ impl MigrationPlan {
                 field: "target_catalog_fingerprint",
             })
     }
+}
+
+fn validate_operation_conversion_bindings(plan: &MigrationPlan) -> Result<(), PlanError> {
+    let MigrationConversionMode::CrossDialect { tables, .. } = &plan.conversion_policy.mode else {
+        if plan
+            .operations
+            .iter()
+            .any(|operation| operation.parameters.contains_key("table_conversion_policy"))
+        {
+            return Err(PlanError::InvalidConversionPolicy);
+        }
+        return Ok(());
+    };
+    let expected = tables
+        .iter()
+        .map(|table| (&table.source_table, table))
+        .collect::<BTreeMap<_, _>>();
+    let mut observed = BTreeSet::new();
+    for operation in &plan.operations {
+        if operation.kind != OperationKind::CopyTable {
+            if operation.parameters.contains_key("table_conversion_policy") {
+                return Err(PlanError::InvalidConversionPolicy);
+            }
+            continue;
+        }
+        let table = operation
+            .table
+            .as_ref()
+            .ok_or(PlanError::InvalidConversionPolicy)?;
+        let reviewed = expected
+            .get(table)
+            .ok_or(PlanError::InvalidConversionPolicy)?;
+        let embedded = operation
+            .parameters
+            .get("table_conversion_policy")
+            .cloned()
+            .map(serde_json::from_value::<super::conversion::TableConversionPolicy>)
+            .transpose()
+            .map_err(|_| PlanError::InvalidConversionPolicy)?
+            .ok_or(PlanError::InvalidConversionPolicy)?;
+        if &embedded != *reviewed || !observed.insert(table) {
+            return Err(PlanError::InvalidConversionPolicy);
+        }
+    }
+    if observed.len() != expected.len() {
+        return Err(PlanError::InvalidConversionPolicy);
+    }
+    Ok(())
 }
 
 fn validate_mysql_authorization_contract(
@@ -836,6 +919,10 @@ pub enum PlanError {
     UnsupportedVersion { found: u16 },
     #[error("unsupported canonical encoding version {found}")]
     UnsupportedCanonicalEncodingVersion { found: u16 },
+    #[error("reviewed conversion policy is invalid")]
+    ConversionPolicy(#[from] RowConversionError),
+    #[error("reviewed conversion policy does not match the plan purpose or catalogs")]
+    InvalidConversionPolicy,
     #[error("required plan field {field} is empty")]
     EmptyField { field: &'static str },
     #[error("plan contains duplicate operation IDs")]
@@ -899,6 +986,11 @@ pub enum PlanError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::conversion::{
+        RowConversionPolicy, TableConversionPolicy, ValueConversionRule,
+        ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+    };
+    use crate::migration::model::{ColumnMeta, Identifier};
     use crate::migration::outage_projection::{
         ByteBasis, ThroughputProfile, OUTAGE_PROJECTION_SCHEMA_VERSION,
         THROUGHPUT_PROFILE_SCHEMA_VERSION,
@@ -939,7 +1031,7 @@ mod tests {
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
             consistency_mode: "consistent-snapshot".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-            conversion_policy: "exact".into(),
+            conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             outage_policy: Some(ReviewedOutagePolicy {
                 schema_version: OUTAGE_PROJECTION_SCHEMA_VERSION,
                 assessment_digest: "a".repeat(64),
@@ -1002,6 +1094,112 @@ mod tests {
     }
 
     #[test]
+    fn cross_dialect_plan_binds_both_catalog_dialects() {
+        let mut plan = plan();
+        let target = match &mut plan.target_catalog {
+            AssessmentStatus::Assessed(target) => target,
+            AssessmentStatus::NotAssessed => unreachable!(),
+        };
+        target.dialect = "mysql".into();
+        target.server_version = "8.4.0".into();
+        plan.target_catalog_fingerprint = AssessmentStatus::Assessed(fingerprint(target));
+        plan.conversion_policy = MigrationConversionPolicy::cross_dialect(
+            ConversionDialect::PostgreSql,
+            ConversionDialect::MySql,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(plan.validate().is_ok());
+
+        plan.conversion_policy = POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY;
+        assert!(matches!(
+            plan.validate(),
+            Err(PlanError::InvalidConversionPolicy)
+        ));
+    }
+
+    #[test]
+    fn cross_dialect_copy_operation_binds_its_exact_table_policy() {
+        let mut plan = plan();
+        let target_catalog = match &mut plan.target_catalog {
+            AssessmentStatus::Assessed(target) => target,
+            AssessmentStatus::NotAssessed => unreachable!(),
+        };
+        target_catalog.dialect = "mysql".into();
+        target_catalog.server_version = "8.4.0".into();
+        plan.target_catalog_fingerprint = AssessmentStatus::Assessed(fingerprint(target_catalog));
+        let source_table = QualifiedTable {
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("items").unwrap(),
+        };
+        let target_table = QualifiedTable {
+            namespace: Identifier::new("app").unwrap(),
+            name: Identifier::new("items").unwrap(),
+        };
+        let source_column = ColumnMeta {
+            name: Identifier::new("id").unwrap(),
+            ordinal: 1,
+            vendor_type: "pg_catalog.int8".into(),
+            nullable: false,
+            collation: None,
+            precision: None,
+            scale: None,
+            timezone_semantics: None,
+        };
+        let target_column = ColumnMeta {
+            vendor_type: "bigint".into(),
+            ..source_column.clone()
+        };
+        let table_policy = TableConversionPolicy {
+            source_table: source_table.clone(),
+            target_table,
+            row_policy: RowConversionPolicy {
+                schema_version: ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+                source_dialect: ConversionDialect::PostgreSql,
+                target_dialect: ConversionDialect::MySql,
+                columns: vec![super::super::conversion::ColumnConversion {
+                    source: source_column,
+                    target: target_column,
+                    rule: ValueConversionRule::SignedInteger {
+                        minimum: i64::MIN,
+                        maximum: i64::MAX,
+                    },
+                }],
+            },
+        };
+        plan.conversion_policy = MigrationConversionPolicy::cross_dialect(
+            ConversionDialect::PostgreSql,
+            ConversionDialect::MySql,
+            vec![table_policy.clone()],
+        )
+        .unwrap();
+        let copy = PlanOperation::new(
+            OperationKind::CopyTable,
+            Some(source_table.clone()),
+            Vec::new(),
+            BTreeMap::from([(
+                "table_conversion_policy".into(),
+                serde_json::to_value(&table_policy).unwrap(),
+            )]),
+        )
+        .unwrap();
+        plan.operations = vec![copy];
+        assert!(plan.validate().is_ok());
+
+        plan.operations = vec![PlanOperation::new(
+            OperationKind::CopyTable,
+            Some(source_table),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap()];
+        assert!(matches!(
+            plan.validate(),
+            Err(PlanError::InvalidConversionPolicy)
+        ));
+    }
+
+    #[test]
     fn mysql_plan_requires_exact_unprotected_catalog_snapshot_evidence() {
         let mut plan = plan();
         let source_catalog = plan.source_catalog.as_mut().unwrap();
@@ -1026,7 +1224,7 @@ mod tests {
         let source_fingerprint = fingerprint(source_catalog);
         plan.source_catalog_fingerprint = source_fingerprint.clone();
         plan.consistency_mode = "mysql-repeatable-read-consistent-snapshot".into();
-        plan.conversion_policy = MYSQL_SAME_DIALECT_CONVERSION_POLICY.into();
+        plan.conversion_policy = MYSQL_SAME_DIALECT_CONVERSION_POLICY;
         plan.outage_policy = None;
         plan.mysql_source_profile = Some(
             crate::migration::mysql_profile::MySqlFreezeProfileContract::external_continuous_freeze(
@@ -1094,12 +1292,12 @@ mod tests {
         ]);
         assert!(plan.validate().is_ok());
 
-        plan.conversion_policy = "different".into();
+        plan.conversion_policy = POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY;
         assert!(matches!(
             plan.validate(),
-            Err(PlanError::InvalidMySqlSnapshotEvidence)
+            Err(PlanError::InvalidConversionPolicy)
         ));
-        plan.conversion_policy = MYSQL_SAME_DIALECT_CONVERSION_POLICY.into();
+        plan.conversion_policy = MYSQL_SAME_DIALECT_CONVERSION_POLICY;
 
         plan.mysql_target_snapshot_evidence
             .as_mut()
@@ -1200,6 +1398,7 @@ mod tests {
         plan.target_catalog = AssessmentStatus::NotAssessed;
         plan.target_tls_binding = AssessmentStatus::NotAssessed;
         plan.consistency_mode.clear();
+        plan.conversion_policy = POSTGRESQL_ASSESSMENT_CONVERSION_POLICY;
 
         assert!(plan.validate().is_ok());
         assert!(matches!(
@@ -1218,6 +1417,7 @@ mod tests {
 
         let mut assessment = execution_plan;
         assessment.purpose = PlanPurpose::Assessment;
+        assessment.conversion_policy = POSTGRESQL_ASSESSMENT_CONVERSION_POLICY;
         assessment.outage_policy = Some(plan().outage_policy.unwrap());
         assert!(matches!(
             assessment.validate(),
@@ -1259,6 +1459,7 @@ mod tests {
         assessment.target_catalog = AssessmentStatus::NotAssessed;
         assessment.target_tls_binding = AssessmentStatus::NotAssessed;
         assessment.consistency_mode.clear();
+        assessment.conversion_policy = POSTGRESQL_ASSESSMENT_CONVERSION_POLICY;
 
         assert!(matches!(
             assessment.validate(),
@@ -1314,6 +1515,7 @@ mod tests {
         let mut changed = reviewed.clone();
         changed.plan.purpose = PlanPurpose::Assessment;
         changed.plan.outage_policy = None;
+        changed.plan.conversion_policy = POSTGRESQL_ASSESSMENT_CONVERSION_POLICY;
         assert!(matches!(
             changed.validate(),
             Err(PlanError::HashMismatch { .. })

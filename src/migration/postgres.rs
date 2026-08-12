@@ -47,7 +47,8 @@ use super::outage_projection::{
 use super::plan::{
     AssessmentStatus, MigrationPlan, OperationId, OperationKind, PlanOperation, PlanPurpose,
     ReviewedPlan, UnsupportedObject, UnsupportedObjectCode, UnsupportedObjectReport,
-    PLAN_SCHEMA_VERSION,
+    PLAN_SCHEMA_VERSION, POSTGRESQL_ASSESSMENT_CONVERSION_POLICY,
+    POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
 };
 use super::postgres_ast::{
     parse_postgres_create_view, parse_postgres_sql_function, PostgresDurableAst,
@@ -6428,7 +6429,7 @@ pub fn build_plan_with_consistency_and_contracts(
         target_tls_binding: AssessmentStatus::Assessed(target.tls_binding.clone()),
         consistency_mode: consistency_mode.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-        conversion_policy: "postgresql_same_dialect_exact".into(),
+        conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
         outage_policy,
         postgres_source_profile,
         mysql_source_profile: None,
@@ -7158,7 +7159,7 @@ pub fn build_source_assessment_with_profile(
         target_tls_binding: AssessmentStatus::NotAssessed,
         consistency_mode: "not_assessed".into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-        conversion_policy: "postgresql_source_only_assessment".into(),
+        conversion_policy: POSTGRESQL_ASSESSMENT_CONVERSION_POLICY,
         outage_policy: None,
         postgres_source_profile: None,
         mysql_source_profile: None,

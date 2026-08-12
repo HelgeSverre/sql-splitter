@@ -669,7 +669,7 @@ mod tests {
     use crate::migration::model::{CatalogNamespace, CatalogObject, Identifier, VendorCatalog};
     use crate::migration::plan::{
         AssessmentStatus, MigrationPlan, PlanPurpose, ReviewedPlan, UnsupportedObjectReport,
-        PLAN_SCHEMA_VERSION,
+        PLAN_SCHEMA_VERSION, POSTGRESQL_ASSESSMENT_CONVERSION_POLICY,
     };
 
     #[test]
@@ -1032,7 +1032,7 @@ mod tests {
             target_tls_binding: AssessmentStatus::NotAssessed,
             consistency_mode: "not_assessed".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-            conversion_policy: "postgresql_same_dialect_exact".into(),
+            conversion_policy: POSTGRESQL_ASSESSMENT_CONVERSION_POLICY,
             outage_policy: None,
             postgres_source_profile: None,
             mysql_source_profile: None,

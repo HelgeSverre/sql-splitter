@@ -22,7 +22,7 @@ use super::postgres_profile::{
 
 const FILE_MAGIC: &[u8; 8] = b"SSJNL001";
 const FRAME_MAGIC: u32 = 0x534a_4631;
-const FORMAT_VERSION: u16 = 5;
+const FORMAT_VERSION: u16 = 6;
 const FILE_HEADER_LEN: u64 = 10;
 const FRAME_HEADER_LEN: usize = 84;
 const FRAME_TRAILER_LEN: usize = 32;
@@ -98,7 +98,30 @@ impl Genesis {
         self.reviewed_plan
             .validate()
             .map_err(|_| AppendJournalError::InvalidGenesis)?;
-        if self.binding.plan_hash != self.reviewed_plan.plan_hash.to_string() {
+        self.reviewed_plan
+            .plan
+            .validate_for_execution()
+            .map_err(|_| AppendJournalError::InvalidGenesis)?;
+        let plan = &self.reviewed_plan.plan;
+        let target_endpoint = plan
+            .target_endpoint_identity
+            .as_assessed()
+            .ok_or(AppendJournalError::InvalidGenesis)?;
+        let target_fingerprint = plan
+            .target_catalog_fingerprint
+            .as_assessed()
+            .ok_or(AppendJournalError::InvalidGenesis)?;
+        if self.binding.migration_id != plan.migration_id
+            || self.binding.plan_hash != self.reviewed_plan.plan_hash.to_string()
+            || self.binding.approval_reference.trim().is_empty()
+            || self.binding.tool_version != plan.tool_version
+            || self.binding.source_endpoint != plan.source_endpoint_identity
+            || &self.binding.target_endpoint != target_endpoint
+            || self.binding.source_schema_fingerprint != plan.source_catalog_fingerprint
+            || &self.binding.target_schema_fingerprint != target_fingerprint
+            || self.binding.conversion_policy != plan.conversion_policy
+            || self.binding.canonical_encoding_version != plan.canonical_encoding_version
+        {
             return Err(AppendJournalError::InvalidGenesis);
         }
         match (
@@ -360,6 +383,7 @@ pub struct JournalProjection {
     requires_sequence_equality: bool,
     expected_sequences: Vec<PostgresSequence>,
     requires_external_quiesce_rescan: bool,
+    requires_approved_transformation_status: bool,
     source_catalog_fingerprint: String,
     source_endpoint_identity: String,
     initial_source_database_identity: Option<String>,
@@ -444,6 +468,11 @@ impl JournalProjection {
                     ..
                 })
             ),
+            requires_approved_transformation_status: genesis
+                .reviewed_plan
+                .plan
+                .conversion_policy
+                .has_approved_transformations(),
             source_catalog_fingerprint: genesis
                 .reviewed_plan
                 .plan
@@ -482,6 +511,7 @@ impl JournalProjection {
             MigrationStatus::ManualReconciliationRequired
                 | MigrationStatus::Cancelled
                 | MigrationStatus::Completed
+                | MigrationStatus::CompletedWithApprovedTransformations
         ) {
             return Err(AppendJournalError::InvalidTransition(
                 "migration status is terminal",
@@ -507,18 +537,36 @@ impl JournalProjection {
                         "verification started with incomplete writes",
                     ));
                 }
-                if *to == MigrationStatus::Completed
-                    && (!self.schema_verified
-                        || (self.requires_external_quiesce_rescan
-                            && self.external_quiesce_rescan.is_none())
-                        || self.prepared_chunk.is_some()
-                        || self.table_verifications.len() != self.copy_operations.len()
-                        || self
-                            .operations
-                            .values()
-                            .any(|state| *state != OperationState::Verified))
+                if matches!(
+                    to,
+                    MigrationStatus::Completed
+                        | MigrationStatus::CompletedWithApprovedTransformations
+                ) && (!self.schema_verified
+                    || (self.requires_external_quiesce_rescan
+                        && self.external_quiesce_rescan.is_none())
+                    || self.prepared_chunk.is_some()
+                    || self.table_verifications.len() != self.copy_operations.len()
+                    || self
+                        .operations
+                        .values()
+                        .any(|state| *state != OperationState::Verified))
                 {
                     return Err(AppendJournalError::InvalidTransition("completion gate"));
+                }
+                let expected_completion = if self.requires_approved_transformation_status {
+                    MigrationStatus::CompletedWithApprovedTransformations
+                } else {
+                    MigrationStatus::Completed
+                };
+                if matches!(
+                    to,
+                    MigrationStatus::Completed
+                        | MigrationStatus::CompletedWithApprovedTransformations
+                ) && *to != expected_completion
+                {
+                    return Err(AppendJournalError::InvalidTransition(
+                        "completion status does not match the conversion policy",
+                    ));
                 }
                 self.status = *to;
             }
@@ -1748,6 +1796,10 @@ fn valid_status_transition(from: MigrationStatus, to: MigrationStatus) -> bool {
         (MigrationStatus::Running, MigrationStatus::Verifying)
             | (MigrationStatus::Running, MigrationStatus::Cancelled)
             | (MigrationStatus::Verifying, MigrationStatus::Completed)
+            | (
+                MigrationStatus::Verifying,
+                MigrationStatus::CompletedWithApprovedTransformations
+            )
             | (_, MigrationStatus::ManualReconciliationRequired)
     )
 }
@@ -1850,6 +1902,7 @@ fn lock_exclusive(_file: &File) -> Result<(), AppendJournalError> {
 mod tests {
     use super::*;
     use crate::migration::canonical::CANONICAL_ENCODING_VERSION;
+    use crate::migration::conversion::{ConversionDialect, MigrationConversionPolicy};
     use crate::migration::journal::ConsistencyEvidence;
     use crate::migration::model::{CatalogNamespace, CatalogObject, Identifier, VendorCatalog};
     use crate::migration::outage_projection::{
@@ -1858,7 +1911,7 @@ mod tests {
     };
     use crate::migration::plan::{
         AssessmentStatus, MigrationPlan, OperationKind, PlanOperation, PlanPurpose, ReviewedPlan,
-        UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
+        UnsupportedObjectReport, PLAN_SCHEMA_VERSION, POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
     };
     use crate::migration::postgres_profile::{
         PostgresExternalQuiesceAttestation, PostgresExternalQuiesceRescanTableEvidence,
@@ -1940,7 +1993,7 @@ mod tests {
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
             consistency_mode: POSTGRES_CONSISTENCY_SNAPSHOT.into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-            conversion_policy: "exact".into(),
+            conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             outage_policy: Some(outage_policy.clone()),
             postgres_source_profile: None,
             mysql_source_profile: None,
@@ -1977,7 +2030,7 @@ mod tests {
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: None,
-            conversion_policy: "exact".into(),
+            conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
         let accepted_outage_projection = AcceptedOutageProjection {
@@ -2010,8 +2063,8 @@ mod tests {
     fn test_catalog(database: &str) -> VendorCatalog {
         VendorCatalog {
             format_version: 1,
-            dialect: "fixture".into(),
-            server_version: "1".into(),
+            dialect: "postgresql".into(),
+            server_version: "17".into(),
             database: Identifier::new(database).unwrap(),
             namespaces: Vec::new(),
             dependencies: Vec::new(),
@@ -2582,6 +2635,18 @@ mod tests {
     }
 
     #[test]
+    fn genesis_rejects_a_binding_conversion_policy_that_differs_from_the_plan() {
+        let mut value = genesis();
+        value.binding.conversion_policy =
+            MigrationConversionPolicy::assessment_source_only(ConversionDialect::PostgreSql);
+
+        assert!(matches!(
+            value.validate(),
+            Err(AppendJournalError::InvalidGenesis)
+        ));
+    }
+
+    #[test]
     fn genesis_requires_an_exact_optional_outage_projection_tuple() {
         let bound = genesis();
 
@@ -2812,6 +2877,56 @@ mod tests {
             .apply(&JournalEvent::MigrationStatus {
                 from: MigrationStatus::Verifying,
                 to: MigrationStatus::Completed,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn cross_dialect_policy_requires_the_distinct_completion_status() {
+        let mut genesis = genesis_from_operations(Vec::new());
+        let mut plan = genesis.reviewed_plan.plan.clone();
+        let target_catalog = match &mut plan.target_catalog {
+            AssessmentStatus::Assessed(catalog) => catalog,
+            AssessmentStatus::NotAssessed => unreachable!(),
+        };
+        target_catalog.dialect = "mysql".into();
+        target_catalog.server_version = "8.4.0".into();
+        let target_fingerprint =
+            hex::encode(Sha256::digest(serde_json::to_vec(target_catalog).unwrap()));
+        plan.target_catalog_fingerprint = AssessmentStatus::Assessed(target_fingerprint.clone());
+        plan.conversion_policy = MigrationConversionPolicy::cross_dialect(
+            ConversionDialect::PostgreSql,
+            ConversionDialect::MySql,
+            Vec::new(),
+        )
+        .unwrap();
+        genesis.reviewed_plan = ReviewedPlan::new(plan).unwrap();
+        genesis.binding.plan_hash = genesis.reviewed_plan.plan_hash.to_string();
+        genesis.binding.target_schema_fingerprint = target_fingerprint;
+        genesis.binding.conversion_policy = genesis.reviewed_plan.plan.conversion_policy.clone();
+
+        let mut projection = JournalProjection::from_genesis(&genesis);
+        projection
+            .apply(&JournalEvent::MigrationStatus {
+                from: MigrationStatus::Running,
+                to: MigrationStatus::Verifying,
+            })
+            .unwrap();
+        projection
+            .apply(&JournalEvent::SchemaVerificationComplete {
+                catalog_fingerprint: hash(),
+            })
+            .unwrap();
+        assert!(projection
+            .apply(&JournalEvent::MigrationStatus {
+                from: MigrationStatus::Verifying,
+                to: MigrationStatus::Completed,
+            })
+            .is_err());
+        projection
+            .apply(&JournalEvent::MigrationStatus {
+                from: MigrationStatus::Verifying,
+                to: MigrationStatus::CompletedWithApprovedTransformations,
             })
             .unwrap();
     }

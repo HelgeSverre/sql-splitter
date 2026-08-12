@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::canonical::canonicalize_json;
-use super::model::{ColumnMeta, DbValue, Identifier};
+use super::model::{ColumnMeta, DbValue, Identifier, QualifiedTable};
 
 pub const ROW_TYPE_CONVERSION_SCHEMA_VERSION: u16 = 1;
 
@@ -21,6 +21,145 @@ pub enum ConversionDialect {
     MySql,
 }
 
+impl ConversionDialect {
+    pub const fn catalog_name(self) -> &'static str {
+        match self {
+            Self::PostgreSql => "postgresql",
+            Self::MySql => "mysql",
+        }
+    }
+}
+
+/// The reviewed conversion contract for one migration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationConversionPolicy {
+    pub schema_version: u16,
+    pub mode: MigrationConversionMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MigrationConversionMode {
+    AssessmentSourceOnly {
+        dialect: ConversionDialect,
+    },
+    SameDialectExact {
+        dialect: ConversionDialect,
+    },
+    CrossDialect {
+        source_dialect: ConversionDialect,
+        target_dialect: ConversionDialect,
+        tables: Vec<TableConversionPolicy>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TableConversionPolicy {
+    pub source_table: QualifiedTable,
+    pub target_table: QualifiedTable,
+    pub row_policy: RowConversionPolicy,
+}
+
+impl MigrationConversionPolicy {
+    pub const fn assessment_source_only(dialect: ConversionDialect) -> Self {
+        Self {
+            schema_version: ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+            mode: MigrationConversionMode::AssessmentSourceOnly { dialect },
+        }
+    }
+
+    pub const fn same_dialect_exact(dialect: ConversionDialect) -> Self {
+        Self {
+            schema_version: ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+            mode: MigrationConversionMode::SameDialectExact { dialect },
+        }
+    }
+
+    pub fn cross_dialect(
+        source_dialect: ConversionDialect,
+        target_dialect: ConversionDialect,
+        tables: Vec<TableConversionPolicy>,
+    ) -> Result<Self, RowConversionError> {
+        let policy = Self {
+            schema_version: ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+            mode: MigrationConversionMode::CrossDialect {
+                source_dialect,
+                target_dialect,
+                tables,
+            },
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    pub fn source_dialect(&self) -> ConversionDialect {
+        match &self.mode {
+            MigrationConversionMode::AssessmentSourceOnly { dialect }
+            | MigrationConversionMode::SameDialectExact { dialect } => *dialect,
+            MigrationConversionMode::CrossDialect { source_dialect, .. } => *source_dialect,
+        }
+    }
+
+    pub fn target_dialect(&self) -> Option<ConversionDialect> {
+        match &self.mode {
+            MigrationConversionMode::AssessmentSourceOnly { .. } => None,
+            MigrationConversionMode::SameDialectExact { dialect } => Some(*dialect),
+            MigrationConversionMode::CrossDialect { target_dialect, .. } => Some(*target_dialect),
+        }
+    }
+
+    pub fn has_approved_transformations(&self) -> bool {
+        matches!(self.mode, MigrationConversionMode::CrossDialect { .. })
+    }
+
+    pub fn validate(&self) -> Result<(), RowConversionError> {
+        if self.schema_version != ROW_TYPE_CONVERSION_SCHEMA_VERSION {
+            return Err(RowConversionError::UnsupportedVersion {
+                found: self.schema_version,
+            });
+        }
+        let MigrationConversionMode::CrossDialect {
+            source_dialect,
+            target_dialect,
+            tables,
+        } = &self.mode
+        else {
+            return Ok(());
+        };
+        if source_dialect == target_dialect {
+            return Err(RowConversionError::SameDialectPolicy);
+        }
+        let mut source_tables = BTreeSet::new();
+        let mut target_tables = BTreeSet::new();
+        let mut previous_source_table = None;
+        for table in tables {
+            if !source_tables.insert(&table.source_table) {
+                return Err(RowConversionError::DuplicateSourceTable {
+                    table: table.source_table.clone(),
+                });
+            }
+            if previous_source_table.is_some_and(|previous| previous > &table.source_table) {
+                return Err(RowConversionError::InvalidTableOrder);
+            }
+            previous_source_table = Some(&table.source_table);
+            if !target_tables.insert(&table.target_table) {
+                return Err(RowConversionError::DuplicateTargetTable {
+                    table: table.target_table.clone(),
+                });
+            }
+            table.row_policy.validate()?;
+            if table.row_policy.source_dialect != *source_dialect
+                || table.row_policy.target_dialect != *target_dialect
+            {
+                return Err(RowConversionError::DialectMismatch);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "rule", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ValueConversionRule {
@@ -28,17 +167,17 @@ pub enum ValueConversionRule {
     BooleanToSigned,
     SignedZeroOneToBoolean,
     SignedInteger {
-        minimum: i128,
-        maximum: i128,
+        minimum: i64,
+        maximum: i64,
     },
     UnsignedInteger {
-        maximum: u128,
+        maximum: u64,
     },
     SignedToUnsigned {
-        maximum: u128,
+        maximum: u64,
     },
     UnsignedToSigned {
-        maximum: i128,
+        maximum: i64,
     },
     DecimalExact {
         precision: u32,
@@ -54,8 +193,8 @@ pub enum ValueConversionRule {
         maximum_year: i32,
     },
     TimeRange {
-        minimum_nanos: i128,
-        maximum_nanos: i128,
+        minimum_nanos: i64,
+        maximum_nanos: i64,
     },
     TimestampExact {
         precision: u8,
@@ -282,22 +421,23 @@ fn convert_value(
             DbValue::Bool(*value == 1)
         }
         (ValueConversionRule::SignedInteger { minimum, maximum }, DbValue::Signed(value))
-            if value >= minimum && value <= maximum =>
+            if *value >= i128::from(*minimum) && *value <= i128::from(*maximum) =>
         {
             DbValue::Signed(*value)
         }
         (ValueConversionRule::UnsignedInteger { maximum }, DbValue::Unsigned(value))
-            if value <= maximum =>
+            if *value <= u128::from(*maximum) =>
         {
             DbValue::Unsigned(*value)
         }
         (ValueConversionRule::SignedToUnsigned { maximum }, DbValue::Signed(value))
-            if *value >= 0 && u128::try_from(*value).is_ok_and(|value| value <= *maximum) =>
+            if *value >= 0
+                && u128::try_from(*value).is_ok_and(|value| value <= u128::from(*maximum)) =>
         {
             DbValue::Unsigned(u128::try_from(*value).map_err(|_| failure())?)
         }
         (ValueConversionRule::UnsignedToSigned { maximum }, DbValue::Unsigned(value))
-            if i128::try_from(*value).is_ok_and(|value| value <= *maximum) =>
+            if i128::try_from(*value).is_ok_and(|value| value <= i128::from(*maximum)) =>
         {
             DbValue::Signed(i128::try_from(*value).map_err(|_| failure())?)
         }
@@ -340,7 +480,9 @@ fn convert_value(
                 maximum_nanos,
             },
             DbValue::Time { nanos },
-        ) if nanos >= minimum_nanos && nanos <= maximum_nanos => DbValue::Time { nanos: *nanos },
+        ) if *nanos >= i128::from(*minimum_nanos) && *nanos <= i128::from(*maximum_nanos) => {
+            DbValue::Time { nanos: *nanos }
+        }
         (
             ValueConversionRule::TimestampExact { precision, offset },
             DbValue::Timestamp {
@@ -400,6 +542,14 @@ pub enum RowConversionError {
     EmptyPolicy,
     #[error("row-conversion policy has invalid column order")]
     InvalidColumnOrder,
+    #[error("migration conversion policy has invalid source table order")]
+    InvalidTableOrder,
+    #[error("migration conversion policy contains duplicate source table {table:?}")]
+    DuplicateSourceTable { table: QualifiedTable },
+    #[error("migration conversion policy contains duplicate target table {table:?}")]
+    DuplicateTargetTable { table: QualifiedTable },
+    #[error("table conversion policy dialects differ from the migration conversion policy")]
+    DialectMismatch,
     #[error("row-conversion policy contains duplicate source column {column}")]
     DuplicateSourceColumn { column: Identifier },
     #[error("row-conversion policy contains duplicate target column {column}")]
@@ -475,13 +625,83 @@ mod tests {
             .unwrap()
     }
 
+    fn table(namespace: &str, name: &str) -> QualifiedTable {
+        QualifiedTable {
+            namespace: Identifier::new(namespace).unwrap(),
+            name: Identifier::new(name).unwrap(),
+        }
+    }
+
+    #[test]
+    fn migration_policy_is_typed_ordered_and_dialect_bound() {
+        let first = TableConversionPolicy {
+            source_table: table("source", "a"),
+            target_table: table("target", "a"),
+            row_policy: policy(vec![ValueConversionRule::SignedInteger {
+                minimum: i64::MIN,
+                maximum: i64::MAX,
+            }]),
+        };
+        let second = TableConversionPolicy {
+            source_table: table("source", "b"),
+            target_table: table("target", "b"),
+            row_policy: policy(vec![ValueConversionRule::TextUtf8Exact]),
+        };
+        let reviewed = MigrationConversionPolicy::cross_dialect(
+            ConversionDialect::MySql,
+            ConversionDialect::PostgreSql,
+            vec![first.clone(), second.clone()],
+        )
+        .unwrap();
+        assert_eq!(reviewed.source_dialect(), ConversionDialect::MySql);
+        assert_eq!(
+            reviewed.target_dialect(),
+            Some(ConversionDialect::PostgreSql)
+        );
+        assert!(reviewed.has_approved_transformations());
+        assert_eq!(
+            serde_json::from_slice::<MigrationConversionPolicy>(
+                &serde_json::to_vec(&reviewed).unwrap()
+            )
+            .unwrap(),
+            reviewed
+        );
+
+        assert!(matches!(
+            MigrationConversionPolicy::cross_dialect(
+                ConversionDialect::MySql,
+                ConversionDialect::PostgreSql,
+                vec![second.clone(), first.clone()],
+            ),
+            Err(RowConversionError::InvalidTableOrder)
+        ));
+        let mut duplicate_target = second;
+        duplicate_target.target_table = first.target_table.clone();
+        assert!(matches!(
+            MigrationConversionPolicy::cross_dialect(
+                ConversionDialect::MySql,
+                ConversionDialect::PostgreSql,
+                vec![first, duplicate_target],
+            ),
+            Err(RowConversionError::DuplicateTargetTable { .. })
+        ));
+        assert!(matches!(
+            MigrationConversionPolicy::cross_dialect(
+                ConversionDialect::MySql,
+                ConversionDialect::MySql,
+                Vec::new(),
+            ),
+            Err(RowConversionError::SameDialectPolicy)
+        ));
+    }
+
     #[test]
     fn integer_and_boolean_boundaries_are_checked_without_coercion() {
         let policy = policy(vec![
             ValueConversionRule::SignedZeroOneToBoolean,
             ValueConversionRule::SignedToUnsigned { maximum: 255 },
             ValueConversionRule::UnsignedToSigned {
-                maximum: i128::from(i16::MAX),
+                maximum: i64::from(i16::MAX),
             },
         ]);
         let source_columns = policy
@@ -584,16 +804,16 @@ mod tests {
             ),
             (
                 ValueConversionRule::SignedInteger {
-                    minimum: i128::MIN,
-                    maximum: i128::MAX,
+                    minimum: i64::MIN,
+                    maximum: i64::MAX,
                 },
-                DbValue::Signed(i128::MIN),
-                DbValue::Signed(i128::MIN),
+                DbValue::Signed(i128::from(i64::MIN)),
+                DbValue::Signed(i128::from(i64::MIN)),
             ),
             (
-                ValueConversionRule::UnsignedInteger { maximum: u128::MAX },
-                DbValue::Unsigned(u128::MAX),
-                DbValue::Unsigned(u128::MAX),
+                ValueConversionRule::UnsignedInteger { maximum: u64::MAX },
+                DbValue::Unsigned(u128::from(u64::MAX)),
+                DbValue::Unsigned(u128::from(u64::MAX)),
             ),
             (
                 ValueConversionRule::SignedToUnsigned { maximum: 255 },
@@ -601,9 +821,9 @@ mod tests {
                 DbValue::Unsigned(255),
             ),
             (
-                ValueConversionRule::UnsignedToSigned { maximum: i128::MAX },
-                DbValue::Unsigned(i128::MAX as u128),
-                DbValue::Signed(i128::MAX),
+                ValueConversionRule::UnsignedToSigned { maximum: i64::MAX },
+                DbValue::Unsigned(i64::MAX as u128),
+                DbValue::Signed(i128::from(i64::MAX)),
             ),
             (
                 ValueConversionRule::Float32ExactBits,

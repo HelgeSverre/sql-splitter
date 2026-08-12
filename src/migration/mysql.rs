@@ -1789,7 +1789,7 @@ fn build_plan_from_execution_source(
         target_tls_binding: AssessmentStatus::Assessed(target.tls_binding.clone()),
         consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-        conversion_policy: MYSQL_SAME_DIALECT_CONVERSION_POLICY.into(),
+        conversion_policy: MYSQL_SAME_DIALECT_CONVERSION_POLICY,
         outage_policy: None,
         postgres_source_profile: None,
         mysql_source_profile: Some(MySqlFreezeProfileContract::external_continuous_freeze()),

@@ -4,10 +4,11 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use super::conversion::MigrationConversionPolicy;
 use super::model::{DbValue, KeyTuple};
 use super::plan::ReviewedPlan;
 
-pub const STATE_SCHEMA_VERSION: u16 = 8;
+pub const STATE_SCHEMA_VERSION: u16 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
@@ -56,7 +57,7 @@ pub struct ResumeBinding {
     pub outage_projection_digest: Option<String>,
     pub external_quiesce_attestation_digest: Option<String>,
     pub mysql_freeze_attestation_digest: Option<String>,
-    pub conversion_policy: String,
+    pub conversion_policy: MigrationConversionPolicy,
     pub canonical_encoding_version: u16,
 }
 
@@ -106,6 +107,7 @@ pub enum MigrationStatus {
     ManualReconciliationRequired,
     Cancelled,
     Completed,
+    CompletedWithApprovedTransformations,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +148,7 @@ pub enum JournalError {
     InvalidBindingDigest {
         field: &'static str,
     },
+    InvalidConversionPolicy,
     EmptyOperationId {
         chunk_id: u64,
     },
@@ -363,12 +366,15 @@ impl MigrationState {
                 "target_schema_fingerprint",
                 self.binding.target_schema_fingerprint.as_str(),
             ),
-            ("conversion_policy", self.binding.conversion_policy.as_str()),
         ] {
             if value.is_empty() {
                 return Err(JournalError::EmptyBindingField { field });
             }
         }
+        self.binding
+            .conversion_policy
+            .validate()
+            .map_err(|_| JournalError::InvalidConversionPolicy)?;
         if let Some(digest) = &self.binding.outage_projection_digest {
             if digest.len() != 64
                 || !digest
@@ -532,11 +538,29 @@ impl MigrationState {
                 }
             }
         }
-        if self.status == MigrationStatus::Completed
-            && self
-                .operations
-                .iter()
-                .any(|operation| operation.state != OperationState::Verified)
+        if matches!(
+            self.status,
+            MigrationStatus::Completed | MigrationStatus::CompletedWithApprovedTransformations
+        ) && self
+            .operations
+            .iter()
+            .any(|operation| operation.state != OperationState::Verified)
+        {
+            return Err(JournalError::CompletionGateFailed);
+        }
+        let expected_completion = if self
+            .binding
+            .conversion_policy
+            .has_approved_transformations()
+        {
+            MigrationStatus::CompletedWithApprovedTransformations
+        } else {
+            MigrationStatus::Completed
+        };
+        if matches!(
+            self.status,
+            MigrationStatus::Completed | MigrationStatus::CompletedWithApprovedTransformations
+        ) && self.status != expected_completion
         {
             return Err(JournalError::CompletionGateFailed);
         }
@@ -839,7 +863,25 @@ impl MigrationState {
     }
 
     pub fn finalize(&mut self) -> Result<(), JournalError> {
-        if self.status != MigrationStatus::Verifying
+        self.finalize_as(MigrationStatus::Completed)
+    }
+
+    pub fn finalize_with_approved_transformations(&mut self) -> Result<(), JournalError> {
+        self.finalize_as(MigrationStatus::CompletedWithApprovedTransformations)
+    }
+
+    fn finalize_as(&mut self, status: MigrationStatus) -> Result<(), JournalError> {
+        let expected_completion = if self
+            .binding
+            .conversion_policy
+            .has_approved_transformations()
+        {
+            MigrationStatus::CompletedWithApprovedTransformations
+        } else {
+            MigrationStatus::Completed
+        };
+        if status != expected_completion
+            || self.status != MigrationStatus::Verifying
             || self
                 .operations
                 .iter()
@@ -851,12 +893,15 @@ impl MigrationState {
         {
             return Err(JournalError::CompletionGateFailed);
         }
-        self.status = MigrationStatus::Completed;
+        self.status = status;
         self.validate_structure(None)
     }
 
     pub fn require_manual_reconciliation(&mut self) -> Result<(), JournalError> {
-        if self.status == MigrationStatus::Completed {
+        if matches!(
+            self.status,
+            MigrationStatus::Completed | MigrationStatus::CompletedWithApprovedTransformations
+        ) {
             return Err(JournalError::InvalidMigrationStatus);
         }
         self.status = MigrationStatus::ManualReconciliationRequired;
@@ -1014,6 +1059,7 @@ impl MigrationState {
 mod tests {
     use super::*;
     use crate::migration::canonical::CANONICAL_ENCODING_VERSION;
+    use crate::migration::conversion::{ConversionDialect, MigrationConversionPolicy};
     fn binding() -> ResumeBinding {
         ResumeBinding {
             migration_id: "m".into(),
@@ -1034,7 +1080,7 @@ mod tests {
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: None,
-            conversion_policy: "exact".into(),
+            conversion_policy: super::super::plan::POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         }
     }
@@ -1155,6 +1201,27 @@ mod tests {
         state.verify_operation("copy").unwrap();
         state.finalize().unwrap();
         assert_eq!(state.status, MigrationStatus::Completed);
+    }
+
+    #[test]
+    fn approved_transformations_require_the_distinct_legacy_completion_status() {
+        let mut binding = binding();
+        binding.conversion_policy = MigrationConversionPolicy::cross_dialect(
+            ConversionDialect::PostgreSql,
+            ConversionDialect::MySql,
+            Vec::new(),
+        )
+        .unwrap();
+        let mut state =
+            MigrationState::with_operations(binding, Vec::<(String, Vec<String>)>::new()).unwrap();
+        state.begin_verification().unwrap();
+
+        assert_eq!(state.finalize(), Err(JournalError::CompletionGateFailed));
+        state.finalize_with_approved_transformations().unwrap();
+        assert_eq!(
+            state.status,
+            MigrationStatus::CompletedWithApprovedTransformations
+        );
     }
 
     #[test]

@@ -39,7 +39,7 @@ use super::model::{
 use super::outage_projection::AcceptedOutageProjection;
 use super::plan::{
     AssessmentStatus, MigrationPlan, OperationKind, PlanOperation, PlanPurpose, ReviewedPlan,
-    UnsupportedObjectReport, PLAN_SCHEMA_VERSION,
+    UnsupportedObjectReport, PLAN_SCHEMA_VERSION, POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
 };
 use super::verify::{verify_keyed_rows, KeyedRow};
 
@@ -927,7 +927,10 @@ fn resume_postgres_plan_internal(
         &reviewed,
         journal.genesis().accepted_outage_projection.as_ref(),
     )?;
-    if journal.projection().status == MigrationStatus::Completed {
+    if matches!(
+        journal.projection().status,
+        MigrationStatus::Completed | MigrationStatus::CompletedWithApprovedTransformations
+    ) {
         return Err(anyhow!("completed migration state cannot be resumed"));
     }
     if journal.projection().status == MigrationStatus::ManualReconciliationRequired {
@@ -4395,7 +4398,7 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
     )?;
     let source_catalog = VendorCatalog {
         format_version: 1,
-        dialect: "fixture".into(),
+        dialect: "postgresql".into(),
         server_version: "1".into(),
         database: Identifier::new("source")?,
         namespaces: Vec::new(),
@@ -4425,7 +4428,7 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         target_tls_binding: AssessmentStatus::Assessed("fixture-target-tls".into()),
         consistency_mode: PostgresConsistencyMode::ConsistentSnapshot.as_str().into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-        conversion_policy: "same-dialect-exact".into(),
+        conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
         outage_policy: None,
         postgres_source_profile: None,
         mysql_source_profile: None,
@@ -5023,7 +5026,7 @@ mod tests {
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: None,
-            conversion_policy: "exact".into(),
+            conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
         let mut state =
@@ -5223,7 +5226,7 @@ mod tests {
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
             consistency_mode: "write-fence".into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-            conversion_policy: "exact".into(),
+            conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             outage_policy: None,
             postgres_source_profile: None,
             mysql_source_profile: None,
@@ -5372,7 +5375,7 @@ mod tests {
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: None,
-            conversion_policy: "exact".into(),
+            conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
         let mut state =
