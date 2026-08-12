@@ -9,6 +9,7 @@ pub mod artifact;
 pub mod assessment;
 pub mod canonical;
 pub mod connection;
+pub mod conversion;
 pub mod fixture;
 pub mod journal;
 pub mod model;
