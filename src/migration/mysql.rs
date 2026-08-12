@@ -3124,9 +3124,12 @@ impl WriteSession for MySqlWriter {
                     .collect::<ConnectionResult<Vec<_>>>()
             })
             .collect::<ConnectionResult<Vec<_>>>()?;
-        self.conn
-            .exec_batch(statement, parameters)
-            .map_err(database_error)?;
+        if let Err(error) = self.conn.exec_batch(statement, parameters) {
+            return match self.cancellation.check() {
+                Err(cancellation) => Err(cancellation),
+                Ok(()) => Err(database_error(error)),
+            };
+        }
         self.cancellation.check()?;
         Ok(())
     }
@@ -3191,13 +3194,21 @@ impl Drop for MySqlVerifier {
 impl VerificationSession for MySqlVerifier {
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
         self.cancellation.check()?;
-        let batch = mysql_select_page(
+        let batch = match mysql_select_page(
             &mut self.conn,
             &self.table_contracts,
             self.max_batch_rows,
             self.max_batch_bytes,
             request,
-        )?;
+        ) {
+            Ok(batch) => batch,
+            Err(error) => {
+                return match self.cancellation.check() {
+                    Err(cancellation) => Err(cancellation),
+                    Ok(()) => Err(error),
+                };
+            }
+        };
         self.cancellation.check()?;
         Ok(batch)
     }
@@ -3238,13 +3249,21 @@ impl ReadSession for MySqlSnapshotReader {
 
     fn select_page(&mut self, request: &KeysetPage) -> ConnectionResult<RowBatch> {
         self.cancellation.check()?;
-        let batch = mysql_select_page(
+        let batch = match mysql_select_page(
             &mut self.conn,
             &self.table_contracts,
             self.max_batch_rows,
             self.max_batch_bytes,
             request,
-        )?;
+        ) {
+            Ok(batch) => batch,
+            Err(error) => {
+                return match self.cancellation.check() {
+                    Err(cancellation) => Err(cancellation),
+                    Ok(()) => Err(error),
+                };
+            }
+        };
         self.cancellation.check()?;
         Ok(batch)
     }

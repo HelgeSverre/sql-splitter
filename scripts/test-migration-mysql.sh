@@ -307,3 +307,7 @@ cargo test --no-default-features --features enterprise-migration-spike,migration
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_recovery_boundary_matrix \
   -- --ignored --exact --nocapture
+
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_mysql_plan_test live_mysql_cancellation_rolls_back_and_resumes \
+  -- --ignored --exact --nocapture

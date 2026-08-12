@@ -3,6 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "migration-fault-injection")]
+use std::{thread, time::Instant};
+
 use mysql::prelude::Queryable;
 use mysql::{Conn, OptsBuilder, SslOpts};
 
@@ -31,8 +34,8 @@ use sql_splitter::migration::mysql_execution::{
 };
 #[cfg(feature = "migration-fault-injection")]
 use sql_splitter::migration::mysql_execution::{
-    execute_live_mysql_frozen_plan_interrupted, MySqlExecutionInterruption,
-    MySqlInterruptedExecution,
+    execute_live_mysql_frozen_plan_interrupted, resume_live_mysql_frozen_plan_with_cancellation,
+    MySqlCancellationResume, MySqlExecutionInterruption, MySqlInterruptedExecution,
 };
 use sql_splitter::migration::mysql_profile::{
     MySqlDdlFreezeMechanism, MySqlDmlFreezeMechanism, MySqlExternalFreezeAssertion,
@@ -446,6 +449,134 @@ fn live_mysql_recovery_boundary_matrix() -> anyhow::Result<()> {
         )?;
         assert_eq!(next_value, Some(10), "case {name}");
     }
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+#[test]
+#[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
+fn live_mysql_cancellation_rolls_back_and_resumes() -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_CONFIG")?;
+    let source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_FREEZE_CONFIG")?;
+    let target_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_CONFIG")?;
+    let target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_METADATA_CONFIG")?;
+    let plan_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_PLAN_OUTPUT")?
+        .with_extension("cancellation.plan.json");
+    let assertion_path = required_path("SQL_SPLITTER_MYSQL_TEST_FREEZE_ASSERTION_OUTPUT")?
+        .with_extension("cancellation.assertion.json");
+    let journal_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_JOURNAL_OUTPUT")?
+        .with_extension("cancellation.journal");
+    let target_config = MySqlEndpointConfig::read(&target_path)?;
+    let mut blocker = connect(&target_config)?;
+    blocker.query_drop("DROP TABLE IF EXISTS migration_execution_target.copy_items")?;
+    write_live_plan_with_visibility(
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &plan_path,
+    )?;
+    write_live_freeze_assertion(&assertion_path, "mysql-cancellation")?;
+    let error = execute_live_mysql_frozen_plan_interrupted(MySqlInterruptedExecution {
+        plan_path: &plan_path,
+        source_config_path: &source_path,
+        source_metadata_config_path: &source_metadata_path,
+        freeze_config_path: &freeze_path,
+        target_config_path: &target_path,
+        target_metadata_config_path: &target_metadata_path,
+        freeze_assertion_path: &assertion_path,
+        approval_reference: "live-cancellation-approval",
+        state_path: &journal_path,
+        interruption: MySqlExecutionInterruption::DdlCommitted,
+    })
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected MySQL execution interruption"));
+
+    blocker.query_drop("START TRANSACTION")?;
+    blocker.query_drop(
+        "SELECT id FROM migration_execution_target.copy_items WHERE id = 1 FOR UPDATE",
+    )?;
+    let mut observer = connect(&target_config)?;
+    let cancellation = CancellationToken::default();
+    let runner_token = cancellation.clone();
+    let cancelled = thread::scope(|scope| -> anyhow::Result<anyhow::Error> {
+        let handle = scope.spawn(|| {
+            resume_live_mysql_frozen_plan_with_cancellation(
+                MySqlCancellationResume {
+                    state_path: &journal_path,
+                    source_config_path: &source_path,
+                    source_metadata_config_path: &source_metadata_path,
+                    freeze_config_path: &freeze_path,
+                    target_config_path: &target_path,
+                    target_metadata_config_path: &target_metadata_path,
+                    freeze_assertion_path: &assertion_path,
+                },
+                runner_token,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let waiting: Option<u64> = observer.exec_first(
+                "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE DB = ? AND INFO LIKE 'INSERT INTO%copy_items%'",
+                (&target_config.database,),
+            )?;
+            if waiting.unwrap_or(0) > 0 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("MySQL INSERT did not block before cancellation timeout");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        cancellation.cancel();
+        let result = handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("MySQL cancellation runner thread panicked"))?;
+        Ok(result.expect_err("MySQL cancellation must stop resume"))
+    })?;
+    assert!(format!("{cancelled:#}")
+        .to_ascii_lowercase()
+        .contains("cancel"));
+    blocker.query_drop("ROLLBACK")?;
+
+    let interrupted = AppendJournal::open_resume(&journal_path)?;
+    assert_eq!(
+        interrupted
+            .projection()
+            .prepared_chunk
+            .as_ref()
+            .map(|chunk| chunk.chunk_id),
+        Some(1)
+    );
+    drop(interrupted);
+    let target_rows: u64 = observer
+        .query_first("SELECT COUNT(*) FROM migration_execution_target.copy_items")?
+        .unwrap();
+    assert_eq!(target_rows, 0, "cancelled chunk must roll back completely");
+
+    let resumed = resume_live_mysql_frozen_plan(
+        &journal_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+    )?;
+    assert_eq!(resumed.copied_rows, 3);
+    assert_eq!(resumed.committed_chunks, 2);
+    let rows: Vec<(i64, String)> = observer
+        .query("SELECT id, payload FROM migration_execution_target.copy_items ORDER BY id")?;
+    assert_eq!(
+        rows,
+        vec![(1, "one".into()), (2, "two".into()), (3, "three".into())]
+    );
     Ok(())
 }
 

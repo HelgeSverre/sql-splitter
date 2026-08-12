@@ -462,6 +462,19 @@ pub struct MySqlInterruptedExecution<'a> {
     pub interruption: MySqlExecutionInterruption,
 }
 
+/// Inputs for a fault-test resume driven by an externally controlled token.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub struct MySqlCancellationResume<'a> {
+    pub state_path: &'a Path,
+    pub source_config_path: &'a Path,
+    pub source_metadata_config_path: &'a Path,
+    pub freeze_config_path: &'a Path,
+    pub target_config_path: &'a Path,
+    pub target_metadata_config_path: &'a Path,
+    pub freeze_assertion_path: &'a Path,
+}
+
 struct MySqlCancellationMonitor {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -706,15 +719,57 @@ pub fn resume_live_mysql_frozen_plan(
 ) -> anyhow::Result<MySqlExecutionReport> {
     let cancellation = CancellationToken::default();
     cancellation.observe_process_sigint()?;
-    let mut journal = AppendJournal::open_resume(state_path.as_ref())?;
+    resume_live_mysql_frozen_plan_internal(
+        state_path.as_ref(),
+        source_config_path.as_ref(),
+        source_metadata_config_path.as_ref(),
+        freeze_config_path.as_ref(),
+        target_config_path.as_ref(),
+        target_metadata_config_path.as_ref(),
+        freeze_assertion_path.as_ref(),
+        cancellation,
+    )
+}
+
+/// Resume using a caller-controlled cancellation token for fault testing.
+#[doc(hidden)]
+#[cfg(feature = "migration-fault-injection")]
+pub fn resume_live_mysql_frozen_plan_with_cancellation(
+    request: MySqlCancellationResume<'_>,
+    cancellation: CancellationToken,
+) -> anyhow::Result<MySqlExecutionReport> {
+    resume_live_mysql_frozen_plan_internal(
+        request.state_path,
+        request.source_config_path,
+        request.source_metadata_config_path,
+        request.freeze_config_path,
+        request.target_config_path,
+        request.target_metadata_config_path,
+        request.freeze_assertion_path,
+        cancellation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resume_live_mysql_frozen_plan_internal(
+    state_path: &Path,
+    source_config_path: &Path,
+    source_metadata_config_path: &Path,
+    freeze_config_path: &Path,
+    target_config_path: &Path,
+    target_metadata_config_path: &Path,
+    freeze_assertion_path: &Path,
+    cancellation: CancellationToken,
+) -> anyhow::Result<MySqlExecutionReport> {
+    let mut journal = AppendJournal::open_resume(state_path)?;
     let reviewed = journal.reviewed_plan().clone();
     reviewed.validate()?;
     reviewed.plan.validate_for_execution()?;
-    let source_config = MySqlEndpointConfig::read(source_config_path.as_ref())?;
-    let source_metadata_config = MySqlEndpointConfig::read(source_metadata_config_path.as_ref())?;
-    let freeze_config = MySqlEndpointConfig::read(freeze_config_path.as_ref())?;
-    let target_config = MySqlEndpointConfig::read(target_config_path.as_ref())?;
-    let target_metadata_config = MySqlEndpointConfig::read(target_metadata_config_path.as_ref())?;
+    let source_config = MySqlEndpointConfig::read(source_config_path)?;
+    let source_metadata_config = MySqlEndpointConfig::read(source_metadata_config_path)?;
+    let freeze_config = MySqlEndpointConfig::read(freeze_config_path)?;
+    let target_config = MySqlEndpointConfig::read(target_config_path)?;
+    let target_metadata_config = MySqlEndpointConfig::read(target_metadata_config_path)?;
     validate_mysql_execution_credential_separation(
         &source_config,
         &source_metadata_config,
@@ -776,7 +831,7 @@ pub fn resume_live_mysql_frozen_plan(
         },
         &assertion,
     )?;
-    mysql_execution_report(state_path.as_ref(), &journal)
+    mysql_execution_report(state_path, &journal)
 }
 
 fn mysql_resume_binding(
