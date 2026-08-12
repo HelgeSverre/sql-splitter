@@ -698,7 +698,6 @@ impl SourceConnectionFactory for PostgresSourceFactory {
             .map_err(database_error)?
             .get(0);
         validate_exported_snapshot_id(&exported_snapshot_id)?;
-        let initial_sequence_states = capture_sequence_states_at_snapshot(&mut client)?;
         let row = client
             .query_one(
                 "SELECT current_database(), current_user, COALESCE(inet_server_addr()::text, 'local'), COALESCE(inet_server_port(), 0), current_setting('server_version'), pg_current_snapshot()::text, current_setting('transaction_read_only')::boolean",
@@ -730,6 +729,7 @@ impl SourceConnectionFactory for PostgresSourceFactory {
                     .into(),
             ));
         }
+        let initial_sequence_states = capture_sequence_states_at_snapshot(&mut client)?;
         let endpoint_identity = format!("postgres://{address}:{port}/{database}?user={user}");
         let lifecycle_id = format!(
             "pg-session-{}",
@@ -4189,17 +4189,12 @@ fn write_parameter(value: &DbValue, ty: &Type) -> ConnectionResult<Box<dyn ToSql
             oid: ty.oid(),
             bytes: value.clone(),
         })),
-        DbValue::Json(value) if *ty == Type::JSON => Ok(Box::new(RawParameter {
-            oid: ty.oid(),
-            bytes: canonicalize_json(value)
-                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
-        })),
         DbValue::Json(value) if *ty == Type::JSONB => {
-            let value = canonicalize_json(value)
+            canonicalize_json(value)
                 .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
             let mut bytes = Vec::with_capacity(value.len() + 1);
             bytes.push(1);
-            bytes.extend_from_slice(&value);
+            bytes.extend_from_slice(value);
             Ok(Box::new(RawParameter {
                 oid: ty.oid(),
                 bytes,
@@ -4586,20 +4581,19 @@ fn decode_value(ty: &Type, raw: Option<RawBinary>) -> ConnectionResult<DbValue> 
             bytes.try_into().map_err(|_| invalid())?,
         ))),
         Type::BYTEA => Ok(DbValue::Bytes(bytes)),
-        Type::JSON => canonicalize_json(&bytes)
-            .map(DbValue::Json)
-            .map_err(|error| {
+        Type::JSON => Ok(DbValue::Vendor {
+            type_id: format!("postgres:{}:{}", ty.oid(), ty.name()),
+            format: ValueFormat::Binary,
+            bytes,
+        }),
+        Type::JSONB if bytes.first() == Some(&1) => {
+            canonicalize_json(&bytes[1..]).map_err(|error| {
                 ConnectionError::Database(format!(
                     "invalid canonical JSON for PostgreSQL {ty}: {error}"
                 ))
-            }),
-        Type::JSONB if bytes.first() == Some(&1) => canonicalize_json(&bytes[1..])
-            .map(DbValue::Json)
-            .map_err(|error| {
-                ConnectionError::Database(format!(
-                    "invalid canonical JSON for PostgreSQL {ty}: {error}"
-                ))
-            }),
+            })?;
+            Ok(DbValue::Json(bytes[1..].to_vec()))
+        }
         Type::JSONB => Err(invalid()),
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::XML => {
             String::from_utf8(bytes)
@@ -6917,7 +6911,7 @@ pub fn collect_live_assessment_with_profile(
         .read_only(true)
         .start()?;
     let identity = transaction.query_one(
-        "SELECT current_database(),current_user,COALESCE(inet_server_addr()::text,'local'),COALESCE(inet_server_port(),0),current_setting('server_version'),current_setting('server_version_num')::integer,current_setting('transaction_read_only')::boolean",
+        "SELECT current_database(),current_user,COALESCE(inet_server_addr()::text,'local'),COALESCE(inet_server_port(),0),current_setting('server_version'),current_setting('server_version_num')::integer,current_setting('transaction_read_only')::boolean,floor(extract(epoch FROM clock_timestamp()))::bigint",
         &[],
     )?;
     let database: String = identity.get(0);
@@ -6927,6 +6921,9 @@ pub fn collect_live_assessment_with_profile(
     let server_version: String = identity.get(4);
     let server_version_num: i32 = identity.get(5);
     let transaction_read_only: bool = identity.get(6);
+    let assessed_at_unix_seconds = u64::try_from(identity.get::<_, i64>(7)).map_err(|_| {
+        PostgresPlanError::InvalidConfig("PostgreSQL clock is before the Unix epoch")
+    })?;
     let direct_write_privileges_absent: bool = transaction
         .query_one(
             "SELECT NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolreplication AND NOT r.rolbypassrls AND NOT has_database_privilege(current_user,current_database(),'CREATE,TEMP') AND NOT EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_' AND has_schema_privilege(current_user,n.oid,'CREATE')) AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_' AND c.relkind IN ('r','p','f','v') AND has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_' AND c.relkind='S' AND has_sequence_privilege(current_user,c.oid,'USAGE,UPDATE')) AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname<>'information_schema' AND n.nspname!~'^pg_' AND p.prosecdef AND has_function_privilege(current_user,p.oid,'EXECUTE')) FROM pg_roles r WHERE r.rolname=current_user",
@@ -6961,10 +6958,6 @@ pub fn collect_live_assessment_with_profile(
     scope_estimates.sort_by(|left, right| left.table.cmp(&right.table));
     transaction.commit()?;
 
-    let assessed_at_unix_seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| PostgresPlanError::InvalidConfig("system clock is before the Unix epoch"))?
-        .as_secs();
     build_source_assessment_with_profile(
         CatalogSnapshot {
             endpoint_identity: format!("postgres://{address}:{port}/{database}?user={user}"),
@@ -7009,8 +7002,10 @@ fn assessment_projection_source(source: &CatalogSnapshot) -> CatalogSnapshot {
             if blocked.contains(dependency.to_object_id.as_str()) {
                 blocked.insert(dependency.from_object_id.as_str());
             }
-            if dependency.dependency_type == "partition_of"
-                && blocked.contains(dependency.from_object_id.as_str())
+            if matches!(
+                dependency.dependency_type.as_str(),
+                "owned_by_table" | "partition_of"
+            ) && blocked.contains(dependency.from_object_id.as_str())
             {
                 blocked.insert(dependency.to_object_id.as_str());
             }
@@ -8212,6 +8207,44 @@ password = "secret"
     }
 
     #[test]
+    fn assessment_projection_removes_the_owner_of_a_blocked_column() {
+        let mut source = snapshot("postgres://source/app?user=reader", true);
+        let table_id = source.catalog.namespaces[0]
+            .objects
+            .iter()
+            .find(|object| object.kind == CatalogObjectKind::Table)
+            .unwrap()
+            .id
+            .clone();
+        let column_id = source.catalog.namespaces[0]
+            .objects
+            .iter()
+            .find(|object| object.kind == CatalogObjectKind::Column)
+            .unwrap()
+            .id
+            .clone();
+        source.catalog.dependencies.push(CatalogDependency {
+            from_object_id: column_id.clone(),
+            to_object_id: table_id.clone(),
+            dependency_type: "owned_by_table".into(),
+        });
+        source.unsupported.objects.push(UnsupportedObject {
+            code: UnsupportedObjectCode::GeneratedDependency,
+            object_id: column_id,
+            object_kind: "generated_dependency".into(),
+            reason: "blocked test column".into(),
+            required_semantics: true,
+        });
+
+        let projected = assessment_projection_source(&source);
+        assert!(!projected.catalog.namespaces[0]
+            .objects
+            .iter()
+            .any(|object| object.id == table_id));
+        assert!(projected.catalog.namespaces[0].objects.is_empty());
+    }
+
+    #[test]
     fn source_assessment_requires_proven_read_only_role() {
         let error = build_source_assessment(snapshot("source", false), true, false, Vec::new())
             .unwrap_err();
@@ -8316,12 +8349,20 @@ credential_env = "PGPASSWORD"
                 Some(RawBinary(br#"{"b":1.00,"a":1e0}"#.to_vec()))
             )
             .unwrap(),
-            DbValue::Json(br#"{"a":1,"b":1}"#.to_vec())
+            DbValue::Vendor {
+                type_id: "postgres:114:json".into(),
+                format: ValueFormat::Binary,
+                bytes: br#"{"b":1.00,"a":1e0}"#.to_vec(),
+            }
         );
-        assert!(matches!(
-            decode_value(&Type::JSON, Some(RawBinary(br#"{"a":1,"a":2}"#.to_vec()))),
-            Err(ConnectionError::Database(_))
-        ));
+        assert_eq!(
+            decode_value(&Type::JSON, Some(RawBinary(br#"{"a":1,"a":2}"#.to_vec()))).unwrap(),
+            DbValue::Vendor {
+                type_id: "postgres:114:json".into(),
+                format: ValueFormat::Binary,
+                bytes: br#"{"a":1,"a":2}"#.to_vec(),
+            }
+        );
     }
 
     #[test]

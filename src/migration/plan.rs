@@ -15,6 +15,7 @@ use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
 pub const PLAN_SCHEMA_VERSION: u16 = 11;
+pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: &str = "mysql_same_dialect_exact";
 pub const MYSQL_STRICT_SQL_MODE: &str =
     "NO_AUTO_VALUE_ON_ZERO,STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION";
 pub const MYSQL_SESSION_CHARACTER_SET: &str = "utf8mb4";
@@ -551,6 +552,7 @@ impl MigrationPlan {
                 }
                 if evidence.lower_case_table_names != target_evidence.lower_case_table_names
                     || self.consistency_mode != "mysql-repeatable-read-consistent-snapshot"
+                    || self.conversion_policy != MYSQL_SAME_DIALECT_CONVERSION_POLICY
                 {
                     return Err(PlanError::InvalidMySqlSnapshotEvidence);
                 }
@@ -993,6 +995,7 @@ mod tests {
         let source_fingerprint = fingerprint(source_catalog);
         plan.source_catalog_fingerprint = source_fingerprint.clone();
         plan.consistency_mode = "mysql-repeatable-read-consistent-snapshot".into();
+        plan.conversion_policy = MYSQL_SAME_DIALECT_CONVERSION_POLICY.into();
         plan.outage_policy = None;
         plan.mysql_source_profile = Some(
             crate::migration::mysql_profile::MySqlFreezeProfileContract::external_continuous_freeze(
@@ -1059,6 +1062,13 @@ mod tests {
             },
         ]);
         assert!(plan.validate().is_ok());
+
+        plan.conversion_policy = "different".into();
+        assert!(matches!(
+            plan.validate(),
+            Err(PlanError::InvalidMySqlSnapshotEvidence)
+        ));
+        plan.conversion_policy = MYSQL_SAME_DIALECT_CONVERSION_POLICY.into();
 
         plan.mysql_target_snapshot_evidence
             .as_mut()

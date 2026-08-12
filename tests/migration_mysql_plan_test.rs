@@ -408,20 +408,32 @@ fn live_mysql_canonical_value_matrix() -> anyhow::Result<()> {
     assert_eq!(source_rows[0][10], DbValue::Float32(0.0f32.to_bits()));
     assert_eq!(source_rows[0][11], DbValue::Float64(0.0f64.to_bits()));
     assert_eq!(source_rows[0][20], DbValue::Bytes(vec![0, 255, 16]));
+    assert_mysql_json_eq(
+        &source_rows[0][22],
+        br#"{"a":1,"ten":12,"wide":9007199254740993,"z":1}"#,
+    )?;
+    assert_mysql_json_eq(
+        &source_rows[1][22],
+        br#"{"array":[1,1,1,null,true,false],"nested":{"a":1,"z":0}}"#,
+    )?;
+    assert_mysql_json_eq(&source_rows[2][22], br#"{"duplicate":2,"number":1}"#)?;
+    let mut source_observer = connect(&source_config)?;
+    let mut target_observer = connect(&target_config)?;
+    let source_number_types: Option<(String, String, String)> = source_observer.query_first(
+        "SELECT JSON_TYPE(JSON_EXTRACT(json_value, '$.ten')), JSON_TYPE(JSON_EXTRACT(json_value, '$.wide')), JSON_UNQUOTE(JSON_EXTRACT(json_value, '$.wide')) FROM migration_values_source.value_matrix WHERE id = 1",
+    )?;
+    let target_number_types: Option<(String, String, String)> = target_observer.query_first(
+        "SELECT JSON_TYPE(JSON_EXTRACT(json_value, '$.ten')), JSON_TYPE(JSON_EXTRACT(json_value, '$.wide')), JSON_UNQUOTE(JSON_EXTRACT(json_value, '$.wide')) FROM migration_values_target.value_matrix WHERE id = 1",
+    )?;
     assert_eq!(
-        source_rows[0][22],
-        DbValue::Json(canonicalize_json(br#"{"a":1,"z":1}"#)?)
+        source_number_types,
+        Some((
+            "INTEGER".into(),
+            "UNSIGNED INTEGER".into(),
+            "9007199254740993".into()
+        ))
     );
-    assert_eq!(
-        source_rows[1][22],
-        DbValue::Json(canonicalize_json(
-            br#"{"array":[1,1,1,null,true,false],"nested":{"a":1,"z":0}}"#
-        )?)
-    );
-    assert_eq!(
-        source_rows[2][22],
-        DbValue::Json(canonicalize_json(br#"{"duplicate":2,"number":1}"#)?)
-    );
+    assert_eq!(target_number_types, source_number_types);
 
     let journal = AppendJournal::open_resume(&journal_path)?;
     assert_eq!(
@@ -469,6 +481,224 @@ fn live_mysql_canonical_value_matrix() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
+fn live_mysql_drift_rejection_matrix() -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_CONFIG")?;
+    let source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_FREEZE_CONFIG")?;
+    let target_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_CONFIG")?;
+    let target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_METADATA_CONFIG")?;
+    let wrong_source_path = required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_SOURCE_CONFIG")?;
+    let wrong_source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_SOURCE_METADATA_CONFIG")?;
+    let wrong_freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_FREEZE_CONFIG")?;
+    let wrong_target_path = required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_TARGET_CONFIG")?;
+    let wrong_target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_TARGET_METADATA_CONFIG")?;
+    let base_plan = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_PLAN_OUTPUT")?;
+    let base_assertion = required_path("SQL_SPLITTER_MYSQL_TEST_FREEZE_ASSERTION_OUTPUT")?;
+    let base_journal = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_JOURNAL_OUTPUT")?;
+    let plan_path = base_plan.with_extension("drift.plan.json");
+    let assertion_path = base_assertion.with_extension("drift.assertion.json");
+    let journal_path = base_journal.with_extension("drift.journal");
+    let target_config = MySqlEndpointConfig::read(&target_path)?;
+    let mut target = connect(&target_config)?;
+    target.query_drop("DROP TABLE IF EXISTS migration_execution_target.copy_items")?;
+
+    let reviewed = write_live_plan_with_visibility(
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &plan_path,
+    )?;
+    write_live_freeze_assertion(&assertion_path, "mysql-drift-matrix")?;
+
+    let mut stale_tool_plan = reviewed.plan.clone();
+    stale_tool_plan.tool_version = "different-tool-version".into();
+    let stale_tool = ReviewedPlan::new(stale_tool_plan)?;
+    let stale_tool_path = base_plan.with_extension("drift.stale-tool.plan.json");
+    let stale_tool_journal = base_journal.with_extension("drift.stale-tool.journal");
+    write_json_new(&stale_tool_path, &stale_tool)?;
+    let error = execute_live_mysql_frozen_plan(
+        &stale_tool_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+        "live-drift-approval",
+        &stale_tool_journal,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("running tool contract"));
+    assert!(!stale_tool_journal.exists());
+
+    let mut wrong_policy = reviewed.plan.clone();
+    wrong_policy.conversion_policy = "different-policy".into();
+    assert!(ReviewedPlan::new(wrong_policy).is_err());
+
+    let mut operation_tamper = reviewed.clone();
+    operation_tamper
+        .plan
+        .operations
+        .iter_mut()
+        .find(|operation| operation.kind == OperationKind::CopyTable)
+        .expect("copy operation")
+        .parameters
+        .insert("unreviewed_parameter".into(), serde_json::json!(true));
+    let operation_tamper_path = base_plan.with_extension("drift.operation.plan.json");
+    let operation_tamper_journal = base_journal.with_extension("drift.operation.journal");
+    write_json_new(&operation_tamper_path, &operation_tamper)?;
+    assert!(execute_live_mysql_frozen_plan(
+        &operation_tamper_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+        "live-drift-approval",
+        &operation_tamper_journal,
+    )
+    .is_err());
+    assert!(!operation_tamper_journal.exists());
+
+    let wrong_source_journal = base_journal.with_extension("drift.wrong-source.journal");
+    assert!(execute_live_mysql_frozen_plan(
+        &plan_path,
+        &wrong_source_path,
+        &wrong_source_metadata_path,
+        &wrong_freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+        "live-drift-approval",
+        &wrong_source_journal,
+    )
+    .is_err());
+    assert!(!wrong_source_journal.exists());
+
+    let wrong_target_journal = base_journal.with_extension("drift.wrong-target.journal");
+    assert!(execute_live_mysql_frozen_plan(
+        &plan_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &wrong_target_path,
+        &wrong_target_metadata_path,
+        &assertion_path,
+        "live-drift-approval",
+        &wrong_target_journal,
+    )
+    .is_err());
+    assert!(!wrong_target_journal.exists());
+
+    let report = execute_live_mysql_frozen_plan(
+        &plan_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+        "live-drift-approval",
+        &journal_path,
+    )?;
+    assert_eq!(report.copied_rows, 3);
+    assert_eq!(report.committed_chunks, 2);
+    let completed_journal = std::fs::read(&journal_path)?;
+    let assert_resume_rejects = || -> anyhow::Result<()> {
+        assert!(resume_live_mysql_frozen_plan(
+            &journal_path,
+            &source_path,
+            &source_metadata_path,
+            &freeze_path,
+            &target_path,
+            &target_metadata_path,
+            &assertion_path,
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&journal_path)?, completed_journal);
+        Ok(())
+    };
+
+    target.query_drop(
+        "UPDATE migration_execution_target.copy_items SET payload = 'different' WHERE id = 2",
+    )?;
+    assert_resume_rejects()?;
+    target.query_drop(
+        "UPDATE migration_execution_target.copy_items SET payload = 'two' WHERE id = 2",
+    )?;
+
+    target.query_drop(
+        "INSERT INTO migration_execution_target.copy_items(id, payload) VALUES (0, 'before')",
+    )?;
+    assert_resume_rejects()?;
+    target.query_drop("DELETE FROM migration_execution_target.copy_items WHERE id = 0")?;
+
+    target.query_drop(
+        "INSERT INTO migration_execution_target.copy_items(id, payload) VALUES (4, 'after')",
+    )?;
+    assert_resume_rejects()?;
+    target.query_drop("DELETE FROM migration_execution_target.copy_items WHERE id = 4")?;
+
+    target.query_drop(
+        "CREATE TABLE migration_execution_target.extra_table (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB",
+    )?;
+    assert_resume_rejects()?;
+    target.query_drop("DROP TABLE migration_execution_target.extra_table")?;
+
+    target.query_drop(
+        "ALTER TABLE migration_execution_target.copy_items ADD COLUMN extra_value BIGINT NULL",
+    )?;
+    assert_resume_rejects()?;
+    target
+        .query_drop("ALTER TABLE migration_execution_target.copy_items DROP COLUMN extra_value")?;
+
+    target.query_drop("ALTER TABLE migration_execution_target.copy_items AUTO_INCREMENT = 20")?;
+    assert_resume_rejects()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the disposable MySQL 8.0/8.4 TLS matrix after lock loss"]
+fn live_mysql_freeze_loss_stops_before_journal() -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_CONFIG")?;
+    let source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_FREEZE_CONFIG")?;
+    let target_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_CONFIG")?;
+    let target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_METADATA_CONFIG")?;
+    let plan_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_PLAN_OUTPUT")?
+        .with_extension("drift.plan.json");
+    let assertion_path = required_path("SQL_SPLITTER_MYSQL_TEST_FREEZE_ASSERTION_OUTPUT")?
+        .with_extension("drift.assertion.json");
+    let journal_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_JOURNAL_OUTPUT")?
+        .with_extension("drift.lost-freeze.journal");
+    let error = execute_live_mysql_frozen_plan(
+        &plan_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+        "live-drift-approval",
+        &journal_path,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("backup-lock owner is absent"));
+    assert!(!journal_path.exists());
+    Ok(())
+}
+
 fn mysql_value_projection() -> anyhow::Result<Vec<Identifier>> {
     Ok([
         "id",
@@ -498,6 +728,14 @@ fn mysql_value_projection() -> anyhow::Result<Vec<Identifier>> {
     .into_iter()
     .map(Identifier::new)
     .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn assert_mysql_json_eq(actual: &DbValue, expected: &[u8]) -> anyhow::Result<()> {
+    let DbValue::Json(actual) = actual else {
+        anyhow::bail!("MySQL JSON column did not decode as JSON");
+    };
+    assert_eq!(canonicalize_json(actual)?, canonicalize_json(expected)?);
+    Ok(())
 }
 
 fn read_mysql_value_rows(

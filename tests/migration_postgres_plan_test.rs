@@ -44,9 +44,11 @@ use sql_splitter::migration::postgres::postgres_foreign_keys;
 use sql_splitter::migration::postgres::{
     build_plan, collect_live_assessment, collect_live_assessment_with_profile, inspect_endpoint,
     postgres_sequences, probe_live_postgres_source_profile, write_live_assessment, write_live_plan,
+    write_live_plan_with_consistency as write_unbudgeted_live_plan_with_consistency,
     write_live_plan_with_outage_policy, write_live_plan_with_policies,
     write_live_plan_with_profile_tier, PostgresConsistencyMode, PostgresEndpointConfig,
-    PostgresPlanError, PostgresSourceFactory, PostgresTargetFactory, PostgresWritePolicy,
+    PostgresPlanError, PostgresSequenceOwnership, PostgresSequenceOwnershipKind,
+    PostgresSourceFactory, PostgresTargetFactory, PostgresWritePolicy,
 };
 use sql_splitter::migration::postgres_fence::{
     attest_postgres_write_fence, install_postgres_write_fence, postgres_write_fence_is_released,
@@ -369,7 +371,7 @@ fn live_postgres_blocking_code_registry_matrix() -> anyhow::Result<()> {
 
     admin_client.batch_execute(
         "CREATE SCHEMA blocking_sequence;
-         CREATE SEQUENCE blocking_sequence.needs_fence;
+         CREATE SEQUENCE blocking_sequence.needs_fence CACHE 2;
          GRANT USAGE ON SCHEMA blocking_sequence TO migration_reader;
          GRANT SELECT ON SEQUENCE blocking_sequence.needs_fence TO migration_reader",
     )?;
@@ -660,11 +662,17 @@ fn live_snapshot_paging_is_stable_during_concurrent_writes() -> anyhow::Result<(
     drop(reader);
 
     let mutator_factory = PostgresSourceFactory::new(PostgresEndpointConfig::read(mutator_path)?);
-    assert!(matches!(
-        mutator_factory.capture_snapshot(),
-        Err(ConnectionError::InvalidRequest(message))
-            if message.contains("write capability")
-    ));
+    let mutator_error = mutator_factory
+        .capture_snapshot()
+        .expect_err("write-capable source role must be rejected");
+    assert!(
+        matches!(
+            &mutator_error,
+            ConnectionError::InvalidRequest(message)
+                if message.contains("write capability")
+        ),
+        "unexpected mutator rejection: {mutator_error:?}"
+    );
     Ok(())
 }
 
@@ -1034,8 +1042,8 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
          ) VALUES (
            NULL,false,32767,2147483647,9223372036854775807,4294967295,
            'Infinity'::real,'-Infinity'::double precision,'Unicode: åß水🧪','edge','z','Upper.Name',
-           decode('00ff','hex'),'{\"nested\":{\"z\":0,\"a\":1},\"number\":1.00}'::json,
-           '{\"number\":1.00,\"nested\":{\"z\":0,\"a\":1}}'::jsonb,
+           decode('00ff','hex'),'{\"duplicate\":1,\"duplicate\":2,\"number\":12,\"wide\":9007199254740993}'::json,
+           '{\"number\":12,\"wide\":9007199254740993,\"nested\":{\"z\":0,\"a\":1}}'::jsonb,
            999999999999999.00001,'2000-02-29','23:59:59.999999','23:59:59',
            '00:00:00.000001-07:30','1999-12-31 23:59:59.999999','1999-12-31 23:59:59',
            '2000-01-01 00:00:00.000001-07:30','2000-01-01 00:00:00-07:30',
@@ -1491,8 +1499,15 @@ fn live_reviewed_plan_executes_and_strictly_finalizes() -> anyhow::Result<()> {
         reviewed.plan.unsupported_objects
     );
 
-    let measured_at_unix_seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let source_endpoint = PostgresEndpointConfig::read(&source)?;
+    let measured_at_unix_seconds = u64::try_from(
+        connect(&source_endpoint)?
+            .query_one(
+                "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint",
+                &[],
+            )?
+            .get::<_, i64>(0),
+    )?;
     let budget_profile = ThroughputProfile {
         schema_version: THROUGHPUT_PROFILE_SCHEMA_VERSION,
         measurement_reference: "live-preflight-budget".into(),
@@ -2009,15 +2024,19 @@ fn live_write_fence_attests_after_restart_blocks_writes_and_releases() -> anyhow
         &state_path,
         1,
     );
-    assert!(interrupted
-        .unwrap_err()
-        .to_string()
-        .contains("injected interruption"));
+    let interrupted_error = interrupted.expect_err("execution must stop at the injected boundary");
+    assert!(
+        interrupted_error
+            .to_string()
+            .contains("injected interruption"),
+        "unexpected interrupted execution error: {interrupted_error:#}"
+    );
     let interrupted_state = AppendJournal::open_resume(&state_path)?;
     assert_eq!(
         interrupted_state.projection().status,
         MigrationStatus::Running
     );
+    drop(interrupted_state);
 
     let report = resume_postgres_fenced_plan(&state_path, &source, &target, &admin, &artifact)
         .context("resume the reviewed plan under the durable write fence")?;
@@ -2764,7 +2783,7 @@ fn run_live_partition_case(
         )?;
         drop(source_admin);
         let renamed_path = directory.path().join("renamed-index-plan.json");
-        let blocked = write_live_plan_with_consistency(
+        let blocked = write_unbudgeted_live_plan_with_consistency(
             &source_path,
             &target_path,
             &renamed_path,
@@ -2777,7 +2796,7 @@ fn run_live_partition_case(
             .iter()
             .any(|object| {
                 object.required_semantics
-                    && object.object_id.starts_with("partition-child-index-name:")
+                    && object.code == UnsupportedObjectCode::PartitionChildIndexName
             }));
         let mut source_admin = connect(&admin)?;
         source_admin.batch_execute(
@@ -2788,7 +2807,7 @@ fn run_live_partition_case(
         )?;
         drop(source_admin);
         let blocked_path = directory.path().join("blocked-plan.json");
-        let blocked = write_live_plan_with_consistency(
+        let blocked = write_unbudgeted_live_plan_with_consistency(
             &source_path,
             &target_path,
             &blocked_path,
@@ -2800,7 +2819,8 @@ fn run_live_partition_case(
             .objects
             .iter()
             .any(|object| {
-                object.required_semantics && object.object_id.starts_with("partition-local-index:")
+                object.required_semantics
+                    && object.code == UnsupportedObjectCode::PartitionLocalIndex
             }));
         let mut source_admin = connect(&admin)?;
         source_admin.batch_execute(
@@ -4048,6 +4068,7 @@ fn live_foreign_key_conflict_requires_manual_reconciliation() -> anyhow::Result<
 
 fn ddl_catalog() -> anyhow::Result<VendorCatalog> {
     let table_id = "table-accounts";
+    let sequence_id = "sequence-accounts-id";
     let table = CatalogObject {
         id: table_id.into(),
         kind: CatalogObjectKind::Table,
@@ -4097,6 +4118,37 @@ fn ddl_catalog() -> anyhow::Result<VendorCatalog> {
             ("columns".into(), serde_json::json!(["id"])),
         ]),
     };
+    let identity_sequence = CatalogObject {
+        id: sequence_id.into(),
+        kind: CatalogObjectKind::Sequence,
+        name: Identifier::new("accounts_id_seq")?,
+        definition: Vec::new(),
+        attributes: BTreeMap::from([
+            ("relkind".into(), serde_json::json!("S")),
+            ("persistence".into(), serde_json::json!("p")),
+            ("type".into(), serde_json::json!("bigint")),
+            ("start".into(), serde_json::json!("1")),
+            ("increment".into(), serde_json::json!("1")),
+            ("minimum".into(), serde_json::json!("1")),
+            ("maximum".into(), serde_json::json!(i64::MAX.to_string())),
+            ("cache".into(), serde_json::json!("1")),
+            ("cycle".into(), serde_json::json!(false)),
+            ("last_value".into(), serde_json::json!("1")),
+            ("is_called".into(), serde_json::json!(false)),
+            ("ownership_count".into(), serde_json::json!(1)),
+            (
+                "ownership".into(),
+                serde_json::to_value(PostgresSequenceOwnership {
+                    table: QualifiedTable {
+                        namespace: Identifier::new("public")?,
+                        name: Identifier::new("accounts")?,
+                    },
+                    column: Identifier::new("id")?,
+                    kind: PostgresSequenceOwnershipKind::IdentityAlways,
+                })?,
+            ),
+        ]),
+    };
     Ok(VendorCatalog {
         format_version: 2,
         dialect: "postgresql".into(),
@@ -4109,6 +4161,7 @@ fn ddl_catalog() -> anyhow::Result<VendorCatalog> {
             charset: Some("UTF8".into()),
             collation: None,
             objects: vec![
+                identity_sequence,
                 table,
                 column("column-id", "id", 1, "bigint", "a")?,
                 column("column-name", "name", 2, "text", "")?,
@@ -4252,7 +4305,7 @@ fn assert_assessment_statement_log(
 fn assert_assessment_statement_set(statements: &[String]) -> anyhow::Result<()> {
     const EXPECTED_COUNT: usize = 23;
     const EXPECTED_SHA256: &str =
-        "46879e0dd5c2b1a518a5620ea3cd9f1be4cda2a225ade3c3153ee8a74891deca";
+        "4cc4c6a80b1bcfe97fbda2fad4870abfc2feba72558d49a7f73bafaf166566eb";
 
     let mut digest = Sha256::new();
     for statement in statements {
@@ -4371,7 +4424,14 @@ fn write_live_execution_plan(
     let output = output.as_ref();
     let source_config = PostgresEndpointConfig::read(source_config_path)?;
     let source = inspect_endpoint(&source_config)?;
-    let measured_at_unix_seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let measured_at_unix_seconds = u64::try_from(
+        connect(&source_config)?
+            .query_one(
+                "SELECT floor(extract(epoch FROM clock_timestamp()))::bigint",
+                &[],
+            )?
+            .get::<_, i64>(0),
+    )?;
     let profile = ThroughputProfile {
         schema_version: THROUGHPUT_PROFILE_SCHEMA_VERSION,
         measurement_reference: "live-test-profile".into(),

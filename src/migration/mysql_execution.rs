@@ -32,7 +32,10 @@ use super::mysql::{
     MySqlTableMapping, MySqlTableState, MySqlTargetFactory,
 };
 use super::mysql_profile::{MySqlExternalFreezeAssertion, MySqlExternalFreezeAttestation};
-use super::plan::{MySqlSnapshotEvidence, OperationKind, PlanOperation, ReviewedPlan};
+use super::plan::{
+    MySqlSnapshotEvidence, OperationKind, PlanOperation, ReviewedPlan,
+    MYSQL_SAME_DIALECT_CONVERSION_POLICY,
+};
 
 trait MySqlDdlTarget {
     fn inspect(&self, expected: &MySqlTableDefinition) -> ConnectionResult<MySqlTableState>;
@@ -632,6 +635,7 @@ fn execute_live_mysql_frozen_plan_internal(
     let reviewed: ReviewedPlan = read_json(plan_path)?;
     reviewed.validate()?;
     reviewed.plan.validate_for_execution()?;
+    validate_mysql_running_tool_contract(&reviewed)?;
     let source_config = MySqlEndpointConfig::read(source_config_path)?;
     let source_metadata_config = MySqlEndpointConfig::read(source_metadata_config_path)?;
     let freeze_config = MySqlEndpointConfig::read(freeze_config_path)?;
@@ -799,6 +803,8 @@ fn resume_live_mysql_frozen_plan_internal(
     let reviewed = journal.reviewed_plan().clone();
     reviewed.validate()?;
     reviewed.plan.validate_for_execution()?;
+    validate_mysql_running_tool_contract(&reviewed)?;
+    validate_mysql_resume_binding(&journal.genesis().binding, &reviewed)?;
     let source_config = MySqlEndpointConfig::read(source_config_path)?;
     let source_metadata_config = MySqlEndpointConfig::read(source_metadata_config_path)?;
     let freeze_config = MySqlEndpointConfig::read(freeze_config_path)?;
@@ -909,6 +915,47 @@ fn mysql_resume_binding(
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     })
+}
+
+fn validate_mysql_running_tool_contract(reviewed: &ReviewedPlan) -> anyhow::Result<()> {
+    if reviewed.plan.tool_version != env!("CARGO_PKG_VERSION")
+        || reviewed.plan.consistency_mode != super::mysql::MYSQL_CONSISTENCY_SNAPSHOT
+        || reviewed.plan.conversion_policy != MYSQL_SAME_DIALECT_CONVERSION_POLICY
+    {
+        return Err(anyhow!(
+            "reviewed MySQL plan differs from the running tool contract"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mysql_resume_binding(
+    binding: &ResumeBinding,
+    reviewed: &ReviewedPlan,
+) -> anyhow::Result<()> {
+    if binding.migration_id != reviewed.plan.migration_id
+        || binding.plan_hash != reviewed.plan_hash.to_string()
+        || binding.tool_version != reviewed.plan.tool_version
+        || binding.tool_version != env!("CARGO_PKG_VERSION")
+        || binding.source_endpoint != reviewed.plan.source_endpoint_identity
+        || binding.target_endpoint != reviewed.plan.execution_target_endpoint_identity()?
+        || binding.source_schema_fingerprint != reviewed.plan.source_catalog_fingerprint
+        || binding.target_schema_fingerprint
+            != reviewed.plan.execution_target_catalog_fingerprint()?
+        || binding.outage_projection_digest.is_some()
+        || binding.external_quiesce_attestation_digest.is_some()
+        || binding.mysql_freeze_attestation_digest.is_none()
+        || binding.conversion_policy != reviewed.plan.conversion_policy
+        || binding.conversion_policy != MYSQL_SAME_DIALECT_CONVERSION_POLICY
+        || binding.canonical_encoding_version != CANONICAL_ENCODING_VERSION
+        || reviewed.plan.canonical_encoding_version != CANONICAL_ENCODING_VERSION
+        || binding.approval_reference.trim().is_empty()
+    {
+        return Err(anyhow!(
+            "MySQL migration state binding differs from the reviewed plan or running tool"
+        ));
+    }
+    Ok(())
 }
 
 fn mysql_journal_genesis(
@@ -2684,7 +2731,7 @@ mod tests {
             target_tls_binding: AssessmentStatus::Assessed(target_tls_binding),
             consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-            conversion_policy: "mysql_same_dialect_exact".into(),
+            conversion_policy: MYSQL_SAME_DIALECT_CONVERSION_POLICY.into(),
             outage_policy: None,
             postgres_source_profile: None,
             mysql_source_profile: Some(
@@ -3196,6 +3243,50 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn running_tool_and_resume_bindings_reject_drift() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let (reviewed, _) = reviewed_plan();
+        validate_mysql_running_tool_contract(&reviewed).unwrap();
+        let journal = journal(&directory.path().join("binding.journal"), reviewed.clone());
+        let binding = journal.genesis().binding.clone();
+        validate_mysql_resume_binding(&binding, &reviewed).unwrap();
+
+        for drifted in [
+            ResumeBinding {
+                tool_version: "different-tool".into(),
+                ..binding.clone()
+            },
+            ResumeBinding {
+                source_endpoint: "different-source".into(),
+                ..binding.clone()
+            },
+            ResumeBinding {
+                target_schema_fingerprint: "different-schema".into(),
+                ..binding.clone()
+            },
+            ResumeBinding {
+                conversion_policy: "different-policy".into(),
+                ..binding.clone()
+            },
+            ResumeBinding {
+                canonical_encoding_version: CANONICAL_ENCODING_VERSION - 1,
+                ..binding.clone()
+            },
+            ResumeBinding {
+                approval_reference: String::new(),
+                ..binding.clone()
+            },
+        ] {
+            assert!(validate_mysql_resume_binding(&drifted, &reviewed).is_err());
+        }
+
+        let mut different_tool = reviewed.plan.clone();
+        different_tool.tool_version = "different-tool".into();
+        let different_tool = ReviewedPlan::new(different_tool).unwrap();
+        assert!(validate_mysql_running_tool_contract(&different_tool).is_err());
     }
 
     #[test]

@@ -7,7 +7,9 @@ container="sqlspl-migration-pg-${postgres_version}-$$"
 minimum_build_free_kib="${SQL_SPLITTER_TEST_MIN_BUILD_FREE_KIB:-4194304}"
 minimum_journal_free_kib="${SQL_SPLITTER_TEST_MIN_JOURNAL_FREE_KIB:-4194304}"
 minimum_docker_free_kib="${SQL_SPLITTER_TEST_MIN_DOCKER_FREE_KIB:-1048576}"
+skip_release_throughput="${SQL_SPLITTER_TEST_SKIP_RELEASE_THROUGHPUT:-0}"
 build_dir="${CARGO_TARGET_DIR:-$PWD/target}"
+test_root="${SQL_SPLITTER_TEST_TMPDIR:-$PWD}"
 
 if ! [[ "$minimum_build_free_kib" =~ ^[0-9]+$ ]]; then
   echo "SQL_SPLITTER_TEST_MIN_BUILD_FREE_KIB must be a non-negative integer" >&2
@@ -21,9 +23,14 @@ if ! [[ "$minimum_docker_free_kib" =~ ^[0-9]+$ ]]; then
   echo "SQL_SPLITTER_TEST_MIN_DOCKER_FREE_KIB must be a non-negative integer" >&2
   exit 2
 fi
+if [[ "$skip_release_throughput" != "0" && "$skip_release_throughput" != "1" ]]; then
+  echo "SQL_SPLITTER_TEST_SKIP_RELEASE_THROUGHPUT must be 0 or 1" >&2
+  exit 2
+fi
 
 mkdir -p "$build_dir"
-test_dir="$(mktemp -d "${TMPDIR:-/tmp}/sqlspl-migration-pg.XXXXXX")"
+mkdir -p "$test_root"
+test_dir="$(mktemp -d "$test_root/.sqlspl-migration-pg.XXXXXX")"
 
 cleanup() {
   docker rm -fv "$container" >/dev/null 2>&1 || true
@@ -331,8 +338,12 @@ test_name=live_target_writer_round_trips_binary_protocol_values
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact
 test_name=live_insert_and_copy_throughput_matrix
-cargo test --release --no-default-features --features enterprise-migration-spike,migration-fault-injection \
-  --test migration_postgres_plan_test "$test_name" -- --ignored --exact --nocapture
+if [[ "$skip_release_throughput" == "1" ]]; then
+  echo "Skipping $test_name; run it separately in release mode for complete evidence."
+else
+  cargo test --release --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+    --test migration_postgres_plan_test "$test_name" -- --ignored --exact --nocapture
+fi
 test_name=live_reviewed_plan_executes_and_strictly_finalizes
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_postgres_plan_test "$test_name" -- --ignored --exact

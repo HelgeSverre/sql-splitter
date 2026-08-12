@@ -45,8 +45,8 @@ use super::mysql_visibility::{
 use super::plan::{
     AssessmentStatus, MigrationPlan, MySqlSnapshotEvidence, OperationKind, PlanError,
     PlanOperation, PlanPurpose, ReviewedPlan, UnsupportedObject, UnsupportedObjectCode,
-    UnsupportedObjectReport, MYSQL_SESSION_CHARACTER_SET, MYSQL_SESSION_COLLATION,
-    MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION,
+    UnsupportedObjectReport, MYSQL_SAME_DIALECT_CONVERSION_POLICY, MYSQL_SESSION_CHARACTER_SET,
+    MYSQL_SESSION_COLLATION, MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION,
 };
 
 pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 2;
@@ -1606,7 +1606,7 @@ fn build_plan_from_execution_source(
         target_tls_binding: AssessmentStatus::Assessed(target.tls_binding.clone()),
         consistency_mode: MYSQL_CONSISTENCY_SNAPSHOT.into(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
-        conversion_policy: "mysql_same_dialect_exact".into(),
+        conversion_policy: MYSQL_SAME_DIALECT_CONVERSION_POLICY.into(),
         outage_policy: None,
         postgres_source_profile: None,
         mysql_source_profile: Some(MySqlFreezeProfileContract::external_continuous_freeze()),
@@ -3003,7 +3003,7 @@ impl TargetConnectionFactory for MySqlTargetFactory {
                     definition
                         .columns
                         .iter()
-                        .map(|column| column.name.clone())
+                        .map(|column| (column.name.clone(), column.data_type.clone()))
                         .collect(),
                 )
             })
@@ -3065,7 +3065,7 @@ struct MySqlWriter {
     registration: Option<SessionRegistration>,
     cancellation: CancellationToken,
     transaction_open: bool,
-    reviewed_projections: BTreeMap<QualifiedTable, Vec<Identifier>>,
+    reviewed_projections: BTreeMap<QualifiedTable, Vec<(Identifier, MySqlColumnType)>>,
 }
 
 impl Drop for MySqlWriter {
@@ -3101,13 +3101,30 @@ impl WriteSession for MySqlWriter {
             ));
         }
         validate_mysql_write_contract(&self.reviewed_projections, table, batch)?;
+        let reviewed_columns = self
+            .reviewed_projections
+            .get(table)
+            .ok_or_else(|| ConnectionError::TableNotFound(table.clone()))?;
         let columns = batch
             .columns()
             .iter()
             .map(|column| quote_identifier(&column.name))
             .collect::<Vec<_>>()
             .join(", ");
-        let placeholders = std::iter::repeat_n("?", batch.columns().len())
+        let placeholders = reviewed_columns
+            .iter()
+            .map(|column| {
+                if column.1 == MySqlColumnType::Json {
+                    // MySQL rejects a binary-character-set parameter during
+                    // implicit JSON conversion. Convert the source JSON bytes
+                    // to reviewed UTF-8 text before parsing them as JSON. The
+                    // target therefore parses the exact server-read number
+                    // text instead of the digest-canonical serialization.
+                    "CAST(CAST(? AS CHAR CHARACTER SET utf8mb4) AS JSON)"
+                } else {
+                    "?"
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let statement = format!(
@@ -3156,7 +3173,7 @@ impl WriteSession for MySqlWriter {
 }
 
 fn validate_mysql_write_contract(
-    reviewed_projections: &BTreeMap<QualifiedTable, Vec<Identifier>>,
+    reviewed_projections: &BTreeMap<QualifiedTable, Vec<(Identifier, MySqlColumnType)>>,
     table: &QualifiedTable,
     batch: &RowBatch,
 ) -> ConnectionResult<()> {
@@ -3167,7 +3184,7 @@ fn validate_mysql_write_contract(
         .columns()
         .iter()
         .map(|column| &column.name)
-        .eq(expected.iter())
+        .eq(expected.iter().map(|column| &column.0))
     {
         return Err(ConnectionError::InvalidRequest(
             "MySQL write projection differs from the reviewed table contract".into(),
@@ -3427,9 +3444,14 @@ fn mysql_write_value(value: &DbValue, column: &ColumnMeta) -> ConnectionResult<V
             Ok(Value::UInt(decoded))
         }
         DbValue::Bytes(value) => Ok(Value::Bytes(value.clone())),
-        DbValue::Json(value) => canonicalize_json(value)
-            .map(Value::Bytes)
-            .map_err(|error| ConnectionError::InvalidRequest(error.to_string())),
+        // The source server's JSON text is the wire value. Canonical JSON is
+        // used only for comparison digests; writing it would change MySQL's
+        // observable INTEGER/DOUBLE representation for some numbers.
+        DbValue::Json(value) => {
+            canonicalize_json(value)
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            Ok(Value::Bytes(value.clone()))
+        }
         DbValue::Date { year, month, day } => Ok(Value::Date(
             u16::try_from(*year).map_err(|_| ConnectionError::UnsupportedKeyValue)?,
             *month,
@@ -3503,9 +3525,11 @@ fn mysql_value(value: Value, column: &ColumnMeta) -> ConnectionResult<DbValue> {
         Value::Float(value) => Ok(DbValue::Float32(value.to_bits())),
         Value::Double(value) => Ok(DbValue::Float64(value.to_bits())),
         Value::Bytes(value) => match column.vendor_type.as_str() {
-            "json" => canonicalize_json(&value)
-                .map(DbValue::Json)
-                .map_err(|error| ConnectionError::Database(error.to_string())),
+            "json" => {
+                canonicalize_json(&value)
+                    .map_err(|error| ConnectionError::Database(error.to_string()))?;
+                Ok(DbValue::Json(value))
+            }
             "bit" | "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob" => {
                 Ok(DbValue::Bytes(value))
             }
@@ -5751,8 +5775,6 @@ mod tests {
             namespace: identifier("app"),
             name: identifier("items"),
         };
-        let reviewed =
-            BTreeMap::from([(table.clone(), vec![identifier("id"), identifier("payload")])]);
         let columns = |names: &[&str]| {
             names
                 .iter()
@@ -5769,6 +5791,27 @@ mod tests {
                 })
                 .collect()
         };
+        let reviewed = BTreeMap::from([(
+            table.clone(),
+            vec![
+                (
+                    identifier("id"),
+                    MySqlColumnType::Integer {
+                        name: "bigint".into(),
+                        unsigned: false,
+                        display_width: None,
+                    },
+                ),
+                (
+                    identifier("payload"),
+                    MySqlColumnType::Integer {
+                        name: "bigint".into(),
+                        unsigned: false,
+                        display_width: None,
+                    },
+                ),
+            ],
+        )]);
         let exact = RowBatch::new(columns(&["id", "payload"]), 1, 1024);
         validate_mysql_write_contract(&reviewed, &table, &exact).unwrap();
 
@@ -6188,15 +6231,27 @@ mod tests {
             timezone_semantics: None,
         };
         assert_eq!(
-            mysql_value(Value::Bytes(br#"{"b":1.00,"a":1e0}"#.to_vec()), &column).unwrap(),
-            DbValue::Json(br#"{"a":1,"b":1}"#.to_vec())
+            mysql_value(
+                Value::Bytes(br#"{"b":12,"a":9007199254740993}"#.to_vec()),
+                &column,
+            )
+            .unwrap(),
+            DbValue::Json(br#"{"b":12,"a":9007199254740993}"#.to_vec())
         );
         assert!(matches!(
             mysql_value(Value::Bytes(br#"{"a":1,"a":2}"#.to_vec()), &column),
             Err(ConnectionError::Database(_))
         ));
+        assert_eq!(
+            mysql_write_value(
+                &DbValue::Json(br#"{"n":12,"wide":9007199254740993}"#.to_vec()),
+                &column,
+            )
+            .unwrap(),
+            Value::Bytes(br#"{"n":12,"wide":9007199254740993}"#.to_vec())
+        );
         assert!(matches!(
-            mysql_write_value(&DbValue::Json(br#"{"a":1,"a":2}"#.to_vec()), &column,),
+            mysql_write_value(&DbValue::Json(br#"{"a":1,"a":2}"#.to_vec()), &column),
             Err(ConnectionError::InvalidRequest(_))
         ));
     }

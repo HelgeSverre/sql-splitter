@@ -184,7 +184,8 @@ INSERT INTO value_matrix VALUES
    b'000000001', '1000-01-01', '2000-02-29 10:11:12.123456',
    '2000-02-29 10:11:12', '2000-02-29 10:11:12.123456',
    '2000-02-29 10:11:12', '-838:59:59.000000', 1901,
-   X'00FF10', X'00FF00AA', '{"z":1.00,"a":1e0}'),
+   X'00FF10', X'00FF00AA',
+   '{"z":1.00,"a":1e0,"ten":12,"wide":9007199254740993}'),
   (2, '', 'combining: é', 127, 32767, 8388607, 2147483647,
    9223372036854775807, 18446744073709551615, 99999999999999999999.9999999999,
    3.25, -1.7976931348623157e308, b'111111111', '9999-12-31',
@@ -341,7 +342,7 @@ export SQL_SPLITTER_MYSQL_TEST_VALUES_JOURNAL_OUTPUT="$journal_dir/values-state.
 docker exec "$container" mysql -uroot -prootpass -Nse \
   "SET PERSIST super_read_only = ON"
 docker exec "$container" mysql -uroot -prootpass -Nse \
-  "LOCK INSTANCE FOR BACKUP; SELECT SLEEP(300)" >/dev/null 2>&1 &
+  "LOCK INSTANCE FOR BACKUP; SELECT SLEEP(900)" >/dev/null 2>&1 &
 lock_pid=$!
 
 backup_lock_connection_id=""
@@ -387,4 +388,31 @@ cargo test --no-default-features --features enterprise-migration-spike,migration
 
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_network_commit_response_loss_matrix \
+  -- --ignored --exact --nocapture
+
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_mysql_plan_test live_mysql_drift_rejection_matrix \
+  -- --ignored --exact --nocapture
+
+# The disposable container root owns this backup-lock connection. Terminate it
+# here, then prove that execution stops before journal creation. This must
+# remain last.
+docker exec "$container" mysql -uroot -prootpass -Nse \
+  "KILL CONNECTION $backup_lock_connection_id" >/dev/null
+wait "$lock_pid" 2>/dev/null || true
+lock_pid=""
+for _ in $(seq 1 50); do
+  lock_owner_exists=$(docker exec "$container" mysql -uroot -prootpass -Nse \
+    "SELECT COUNT(*) FROM performance_schema.threads WHERE PROCESSLIST_ID = $backup_lock_connection_id" 2>/dev/null || true)
+  if [ "$lock_owner_exists" = "0" ]; then
+    break
+  fi
+  sleep 0.1
+done
+if [ "$lock_owner_exists" != "0" ]; then
+  echo "external MySQL backup-lock owner did not terminate" >&2
+  exit 1
+fi
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_mysql_plan_test live_mysql_freeze_loss_stops_before_journal \
   -- --ignored --exact --nocapture

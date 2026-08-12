@@ -225,6 +225,11 @@ defines:
 - JSON parsed and serialized with decoded object keys in Unicode order,
   preserved array order, exact coefficient-and-exponent number normalization,
   and duplicate-key rejection before canonical framing;
+- source JSON text is never replaced by the digest-canonical serialization on
+  a database write. PostgreSQL `json` remains an exact vendor-text value so
+  its legal duplicate keys and lexical representation round-trip unchanged;
+  normalized MySQL JSON and PostgreSQL `jsonb` use canonical JSON only when
+  calculating comparison digests;
 - catalog column order and complete key tuples.
 
 Exact test vectors version this format. XXH3 may be used later as a fast

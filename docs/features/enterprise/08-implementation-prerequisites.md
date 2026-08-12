@@ -85,7 +85,10 @@ float bits, `BIT`, temporal precision, binary/blob bytes, normalized JSON,
 catalog column order, and complete keys. MySQL normalizes negative floating
 zero when storing it and resolves duplicate JSON object members before readback;
 the shared canonical parser separately proves signed-zero framing and rejects
-duplicate decoded JSON keys. The broader drift gate below remains open.
+duplicate decoded JSON keys. JSON wire writes preserve the exact server-read
+number text, including integer type for values above 2^53; digest-canonical
+text is never used as the write payload. The broader drift gate below remains
+open.
 
 ## Planning ranges
 
