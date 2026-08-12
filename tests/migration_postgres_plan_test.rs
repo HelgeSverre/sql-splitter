@@ -1011,7 +1011,7 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
            binary_value bytea,
            json_value json,
            jsonb_value jsonb,
-           numeric_value numeric,
+           numeric_value numeric(20,5),
            date_value date,
            time_value time(6),
            time0_value time(0),
@@ -1095,7 +1095,7 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
            float4_value real, float8_value double precision, text_value text,
            varchar_value varchar(12), bpchar_value char(6), name_value name,
            binary_value bytea, json_value json, jsonb_value jsonb,
-           numeric_value numeric, date_value date, time_value time(6), time0_value time(0),
+           numeric_value numeric(20,5), date_value date, time_value time(6), time0_value time(0),
            timetz_value time(6) with time zone, timestamp_value timestamp(6),
            timestamp0_value timestamp(0), timestamptz_value timestamptz(6),
            timestamptz0_value timestamptz(0), uuid_value uuid

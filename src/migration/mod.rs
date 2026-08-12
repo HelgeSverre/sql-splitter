@@ -21,6 +21,7 @@ pub mod outage_projection;
 pub mod plan;
 pub mod postgres;
 pub mod postgres_ast;
+mod postgres_codec;
 pub mod postgres_fence;
 pub mod postgres_profile;
 pub mod runner;

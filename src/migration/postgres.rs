@@ -61,6 +61,10 @@ use super::plan::{
 use super::postgres_ast::{
     parse_postgres_create_view, parse_postgres_sql_function, PostgresDurableAst,
 };
+use super::postgres_codec::{
+    decode_date, decode_numeric, decode_time, decode_timestamp, encode_date, encode_numeric,
+    encode_time, encode_timestamp,
+};
 use super::postgres_profile::{
     PostgresSourceProbeArtifact, PostgresSourceProbeRequirement, PostgresSourceProbeResult,
     PostgresSourceProbeStatus, PostgresSourceProfileContract, PostgresSourceProfileError,
@@ -4736,6 +4740,32 @@ fn write_parameter(value: &DbValue, ty: &Type) -> ConnectionResult<Box<dyn ToSql
                 bytes,
             }))
         }
+        DbValue::Decimal { coefficient, scale } if *ty == Type::NUMERIC => {
+            Ok(Box::new(RawParameter {
+                oid: ty.oid(),
+                bytes: encode_numeric(coefficient, *scale)
+                    .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+            }))
+        }
+        DbValue::Date { year, month, day } if *ty == Type::DATE => Ok(Box::new(RawParameter {
+            oid: ty.oid(),
+            bytes: encode_date(*year, *month, *day)
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+        })),
+        DbValue::Time { nanos } if *ty == Type::TIME => Ok(Box::new(RawParameter {
+            oid: ty.oid(),
+            bytes: encode_time(*nanos)
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+        })),
+        DbValue::Timestamp {
+            local,
+            offset_minutes,
+            precision,
+        } if matches!(*ty, Type::TIMESTAMP | Type::TIMESTAMPTZ) => Ok(Box::new(RawParameter {
+            oid: ty.oid(),
+            bytes: encode_timestamp(local, *offset_minutes, *precision, *ty == Type::TIMESTAMPTZ)
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+        })),
         DbValue::Vendor {
             type_id,
             format: ValueFormat::Binary,
@@ -4891,7 +4921,7 @@ impl PostgresSnapshotReader {
             let mut encoded_bytes = 0usize;
             for (index, column) in row.columns().iter().enumerate() {
                 let raw: Option<RawBinary> = row.try_get(index).map_err(database_error)?;
-                let value = decode_value(column.type_(), raw)?;
+                let value = decode_value(column.type_(), raw, batch.columns().get(index))?;
                 encoded_bytes = encoded_bytes
                     .checked_add(encoded_size(&value))
                     .ok_or_else(|| ConnectionError::BatchLimit("row byte count overflow".into()))?;
@@ -5055,6 +5085,46 @@ fn key_parameter(value: &DbValue, vendor_type: &str) -> ConnectionResult<Box<dyn
             "pg_catalog.text" | "pg_catalog.varchar" | "pg_catalog.bpchar" | "pg_catalog.name",
         ) => Ok(Box::new(value.clone())),
         (DbValue::Bytes(value), "pg_catalog.bytea") => Ok(Box::new(value.clone())),
+        (DbValue::Decimal { coefficient, scale }, "pg_catalog.numeric") => {
+            Ok(Box::new(RawParameter {
+                oid: Type::NUMERIC.oid(),
+                bytes: encode_numeric(coefficient, *scale)
+                    .map_err(|_| ConnectionError::UnsupportedKeyValue)?,
+            }))
+        }
+        (DbValue::Date { year, month, day }, "pg_catalog.date") => Ok(Box::new(RawParameter {
+            oid: Type::DATE.oid(),
+            bytes: encode_date(*year, *month, *day)
+                .map_err(|_| ConnectionError::UnsupportedKeyValue)?,
+        })),
+        (DbValue::Time { nanos }, "pg_catalog.time") => Ok(Box::new(RawParameter {
+            oid: Type::TIME.oid(),
+            bytes: encode_time(*nanos).map_err(|_| ConnectionError::UnsupportedKeyValue)?,
+        })),
+        (
+            DbValue::Timestamp {
+                local,
+                offset_minutes,
+                precision,
+            },
+            "pg_catalog.timestamp",
+        ) => Ok(Box::new(RawParameter {
+            oid: Type::TIMESTAMP.oid(),
+            bytes: encode_timestamp(local, *offset_minutes, *precision, false)
+                .map_err(|_| ConnectionError::UnsupportedKeyValue)?,
+        })),
+        (
+            DbValue::Timestamp {
+                local,
+                offset_minutes,
+                precision,
+            },
+            "pg_catalog.timestamptz",
+        ) => Ok(Box::new(RawParameter {
+            oid: Type::TIMESTAMPTZ.oid(),
+            bytes: encode_timestamp(local, *offset_minutes, *precision, true)
+                .map_err(|_| ConnectionError::UnsupportedKeyValue)?,
+        })),
         (
             DbValue::Vendor {
                 type_id,
@@ -5090,7 +5160,11 @@ impl<'a> FromSql<'a> for RawBinary {
     }
 }
 
-fn decode_value(ty: &Type, raw: Option<RawBinary>) -> ConnectionResult<DbValue> {
+fn decode_value(
+    ty: &Type,
+    raw: Option<RawBinary>,
+    metadata: Option<&ColumnMeta>,
+) -> ConnectionResult<DbValue> {
     let Some(RawBinary(bytes)) = raw else {
         return Ok(DbValue::Null);
     };
@@ -5131,6 +5205,33 @@ fn decode_value(ty: &Type, raw: Option<RawBinary>) -> ConnectionResult<DbValue> 
             Ok(DbValue::Json(bytes[1..].to_vec()))
         }
         Type::JSONB => Err(invalid()),
+        Type::NUMERIC
+            if metadata.is_some_and(|column| {
+                column.precision.is_some_and(|precision| precision <= 65)
+                    && column.scale.is_some_and(|scale| (0..=30).contains(&scale))
+            }) =>
+        {
+            decode_numeric(
+                &bytes,
+                metadata
+                    .and_then(|column| column.precision)
+                    .unwrap_or_default(),
+                metadata.and_then(|column| column.scale).unwrap_or_default(),
+            )
+            .map_err(|error| ConnectionError::Database(error.to_string()))
+        }
+        Type::DATE => {
+            decode_date(&bytes).map_err(|error| ConnectionError::Database(error.to_string()))
+        }
+        Type::TIME => {
+            decode_time(&bytes).map_err(|error| ConnectionError::Database(error.to_string()))
+        }
+        Type::TIMESTAMP | Type::TIMESTAMPTZ => {
+            let precision = metadata.and_then(|column| column.precision).unwrap_or(6);
+            let precision = u8::try_from(precision).map_err(|_| invalid())?;
+            decode_timestamp(&bytes, precision, *ty == Type::TIMESTAMPTZ)
+                .map_err(|error| ConnectionError::Database(error.to_string()))
+        }
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::XML => {
             String::from_utf8(bytes)
                 .map(DbValue::Text)
@@ -8990,17 +9091,18 @@ credential_env = "PGPASSWORD"
     #[test]
     fn binary_decoder_rejects_invalid_boolean_and_jsonb_versions() {
         assert!(matches!(
-            decode_value(&Type::BOOL, Some(RawBinary(vec![2]))),
+            decode_value(&Type::BOOL, Some(RawBinary(vec![2])), None),
             Err(ConnectionError::Database(_))
         ));
         assert!(matches!(
-            decode_value(&Type::JSONB, Some(RawBinary(vec![2, b'{', b'}']))),
+            decode_value(&Type::JSONB, Some(RawBinary(vec![2, b'{', b'}'])), None),
             Err(ConnectionError::Database(_))
         ));
         assert_eq!(
             decode_value(
                 &Type::JSON,
-                Some(RawBinary(br#"{"b":1.00,"a":1e0}"#.to_vec()))
+                Some(RawBinary(br#"{"b":1.00,"a":1e0}"#.to_vec())),
+                None,
             )
             .unwrap(),
             DbValue::Vendor {
@@ -9010,7 +9112,12 @@ credential_env = "PGPASSWORD"
             }
         );
         assert_eq!(
-            decode_value(&Type::JSON, Some(RawBinary(br#"{"a":1,"a":2}"#.to_vec()))).unwrap(),
+            decode_value(
+                &Type::JSON,
+                Some(RawBinary(br#"{"a":1,"a":2}"#.to_vec())),
+                None,
+            )
+            .unwrap(),
             DbValue::Vendor {
                 type_id: "postgres:114:json".into(),
                 format: ValueFormat::Binary,

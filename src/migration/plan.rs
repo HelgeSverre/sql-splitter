@@ -18,7 +18,7 @@ use super::mysql_visibility::{
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 14;
+pub const PLAN_SCHEMA_VERSION: u16 = 15;
 pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
     MigrationConversionPolicy::same_dialect_exact(ConversionDialect::MySql);
 pub const POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
