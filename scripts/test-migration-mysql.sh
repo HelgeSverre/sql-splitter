@@ -155,6 +155,7 @@ CREATE USER 'target_metadata_admin'@'%' IDENTIFIED BY 'targetmetapass' REQUIRE X
 CREATE USER 'business_reader'@'%' IDENTIFIED BY 'unusedpass' REQUIRE X509;
 CREATE USER 'partially_restricted_reader'@'%' IDENTIFIED BY 'unusedpass' REQUIRE X509;
 CREATE USER 'migration_execution_source'@'%' IDENTIFIED BY 'execsourcepass' REQUIRE X509;
+CREATE USER 'tls_no_client'@'%' IDENTIFIED BY 'tlsnoclientpass';
 CREATE ROLE 'source_metadata_role'@'%';
 CREATE ROLE 'target_metadata_role'@'%';
 GRANT SELECT, SHOW VIEW ON migration_source.* TO 'migration_source'@'%';
@@ -179,6 +180,8 @@ GRANT SELECT, SHOW VIEW ON migration_values_source.* TO 'migration_execution_sou
 GRANT SELECT, SHOW VIEW ON migration_fk_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT, SHOW VIEW ON migration_integrity_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT, SHOW VIEW ON migration_security_source.* TO 'migration_execution_source'@'%';
+GRANT SELECT, SHOW VIEW ON migration_security_source.* TO 'tls_no_client'@'%';
+GRANT SYSTEM_USER ON *.* TO 'tls_no_client'@'%';
 GRANT SELECT ON migration_values_source.* TO 'migration_admin'@'%';
 GRANT SELECT ON migration_fk_source.* TO 'migration_admin'@'%';
 GRANT SELECT ON migration_integrity_source.* TO 'migration_admin'@'%';
@@ -395,7 +398,7 @@ max_batch_bytes = 1048576
 EOF
   if [ -n "$server_admin_user" ]; then
     printf '%s\n' \
-      'operational_server_administrators = [{ user = "mysql.infoschema", host = "localhost" }, { user = "mysql.session", host = "localhost" }, { user = "mysql.sys", host = "localhost" }, { user = "root", host = "%" }, { user = "root", host = "localhost" }]' \
+      'operational_server_administrators = [{ user = "mysql.infoschema", host = "localhost" }, { user = "mysql.session", host = "localhost" }, { user = "mysql.sys", host = "localhost" }, { user = "root", host = "%" }, { user = "root", host = "localhost" }, { user = "tls_no_client", host = "%" }]' \
       >> "$path"
   fi
   cat >> "$path" <<EOF
@@ -467,6 +470,7 @@ CREATE DATABASE migration_integrity_target CHARACTER SET utf8mb4 COLLATE utf8mb4
 CREATE DATABASE migration_security_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_execution_target'@'%' IDENTIFIED BY 'exectargetpass' REQUIRE X509;
 CREATE USER 'execution_target_metadata_admin'@'%' IDENTIFIED BY 'exectargetmetapass' REQUIRE X509;
+CREATE USER 'tls_no_client'@'%' IDENTIFIED BY 'tlsnoclientpass';
 CREATE ROLE 'execution_target_metadata_role'@'%';
 GRANT ALL PRIVILEGES ON migration_execution_target.* TO 'migration_execution_target'@'%';
 GRANT ALL PRIVILEGES ON migration_values_target.* TO 'migration_execution_target'@'%';
@@ -478,6 +482,7 @@ GRANT ALL PRIVILEGES ON migration_security_target.* TO 'migration_execution_targ
 GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON *.* TO 'execution_target_metadata_admin'@'%';
 GRANT SHOW_ROUTINE ON *.* TO 'execution_target_metadata_role'@'%';
 GRANT 'execution_target_metadata_role'@'%' TO 'execution_target_metadata_admin'@'%';
+GRANT SYSTEM_USER ON *.* TO 'tls_no_client'@'%';
 SQL
 
 execution_source_config="$test_dir/execution-source.toml"
@@ -512,6 +517,7 @@ security_target_metadata_config="$test_dir/security-target-metadata.toml"
 wrong_hostname_config="$test_dir/wrong-hostname.toml"
 untrusted_ca_config="$test_dir/untrusted-ca.toml"
 missing_client_config="$test_dir/missing-client.toml"
+no_client_control_config="$test_dir/no-client-control.toml"
 explicit_insecure_config="$test_dir/explicit-insecure.toml"
 write_config "$execution_source_config" "$port" migration_execution_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
 write_config "$execution_source_metadata_config" "$port" migration_execution_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
@@ -542,15 +548,19 @@ write_config "$security_source_metadata_config" "$port" migration_security_sourc
 write_config "$security_freeze_config" "$port" migration_security_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
 write_config "$security_target_config" "$target_port" migration_security_target migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
 write_config "$security_target_metadata_config" "$target_port" migration_security_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
+write_config "$no_client_control_config" "$port" migration_security_source tls_no_client SQL_SPLITTER_MYSQL_TLS_NO_CLIENT_PASSWORD
+awk '!/^client_identity_pkcs12 = / && !/^client_identity_password_env = /' \
+  "$no_client_control_config" > "$no_client_control_config.tmp"
+mv "$no_client_control_config.tmp" "$no_client_control_config"
 
 write_config "$wrong_hostname_config" "$tls_port" tls_probe tls_probe SQL_SPLITTER_MYSQL_TLS_PROBE_PASSWORD
-cp "$wrong_hostname_config" "$untrusted_ca_config"
+cp "$execution_source_config" "$untrusted_ca_config"
 awk -v replacement="ca_certificate = \"$cert_dir/untrusted-ca.pem\"" \
   '{ if ($0 ~ /^ca_certificate = /) print replacement; else print }' \
   "$untrusted_ca_config" > "$untrusted_ca_config.tmp"
 mv "$untrusted_ca_config.tmp" "$untrusted_ca_config"
 awk '!/^client_identity_pkcs12 = / && !/^client_identity_password_env = /' \
-  "$wrong_hostname_config" > "$missing_client_config"
+  "$execution_source_config" > "$missing_client_config"
 cp "$wrong_hostname_config" "$explicit_insecure_config"
 awk -v replacement="ca_certificate = \"$cert_dir/untrusted-ca.pem\"" \
   '{
@@ -563,6 +573,7 @@ export SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD=execsourcepass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD=exectargetpass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD=exectargetmetapass
 export SQL_SPLITTER_MYSQL_TLS_PROBE_PASSWORD=tlsprobepass
+export SQL_SPLITTER_MYSQL_TLS_NO_CLIENT_PASSWORD=tlsnoclientpass
 export SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_CONFIG="$execution_source_config"
 export SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_METADATA_CONFIG="$execution_source_metadata_config"
 export SQL_SPLITTER_MYSQL_TEST_EXECUTION_FREEZE_CONFIG="$execution_freeze_config"
@@ -605,6 +616,7 @@ export SQL_SPLITTER_MYSQL_TEST_SECURITY_TARGET_METADATA_CONFIG="$security_target
 export SQL_SPLITTER_MYSQL_TEST_WRONG_HOSTNAME_CONFIG="$wrong_hostname_config"
 export SQL_SPLITTER_MYSQL_TEST_UNTRUSTED_CA_CONFIG="$untrusted_ca_config"
 export SQL_SPLITTER_MYSQL_TEST_MISSING_CLIENT_CONFIG="$missing_client_config"
+export SQL_SPLITTER_MYSQL_TEST_NO_CLIENT_CONTROL_CONFIG="$no_client_control_config"
 export SQL_SPLITTER_MYSQL_TEST_EXPLICIT_INSECURE_CONFIG="$explicit_insecure_config"
 export SQL_SPLITTER_MYSQL_TEST_SECURITY_ARTIFACT_DIR="$test_dir"
 export SQL_SPLITTER_MYSQL_TEST_SECURITY_JOURNAL_DIR="$journal_dir"

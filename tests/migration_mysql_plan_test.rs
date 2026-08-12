@@ -283,6 +283,7 @@ fn live_mysql_tls_redaction_and_artifact_security() -> anyhow::Result<()> {
     let wrong_hostname_path = required_path("SQL_SPLITTER_MYSQL_TEST_WRONG_HOSTNAME_CONFIG")?;
     let untrusted_ca_path = required_path("SQL_SPLITTER_MYSQL_TEST_UNTRUSTED_CA_CONFIG")?;
     let missing_client_path = required_path("SQL_SPLITTER_MYSQL_TEST_MISSING_CLIENT_CONFIG")?;
+    let no_client_control_path = required_path("SQL_SPLITTER_MYSQL_TEST_NO_CLIENT_CONTROL_CONFIG")?;
     let explicit_insecure_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXPLICIT_INSECURE_CONFIG")?;
     let artifact_dir = required_path("SQL_SPLITTER_MYSQL_TEST_SECURITY_ARTIFACT_DIR")?;
     let journal_dir = required_path("SQL_SPLITTER_MYSQL_TEST_SECURITY_JOURNAL_DIR")?;
@@ -306,12 +307,36 @@ fn live_mysql_tls_redaction_and_artifact_security() -> anyhow::Result<()> {
 
     let secure = inspect_live_endpoint(source_config.clone())?;
     assert!(secure.tls_binding.starts_with("hostname_verified+mtls;"));
-    for path in [
-        &wrong_hostname_path,
-        &untrusted_ca_path,
-        &missing_client_path,
-    ] {
-        let error = inspect_live_endpoint(MySqlEndpointConfig::read(path)?).unwrap_err();
+    let wrong_hostname = MySqlEndpointConfig::read(&wrong_hostname_path)?;
+    let untrusted_ca = MySqlEndpointConfig::read(&untrusted_ca_path)?;
+    let missing_client = MySqlEndpointConfig::read(&missing_client_path)?;
+    assert_ne!(wrong_hostname.port, source_config.port);
+    assert_eq!(
+        wrong_hostname.tls.ca_certificate,
+        source_config.tls.ca_certificate
+    );
+    assert_eq!(untrusted_ca.port, source_config.port);
+    assert_ne!(
+        untrusted_ca.tls.ca_certificate,
+        source_config.tls.ca_certificate
+    );
+    assert!(untrusted_ca.tls.client_identity_pkcs12.is_some());
+    assert_eq!(missing_client.port, source_config.port);
+    assert_eq!(
+        missing_client.tls.ca_certificate,
+        source_config.tls.ca_certificate
+    );
+    assert!(missing_client.tls.client_identity_pkcs12.is_none());
+    assert!(missing_client.tls.client_identity_password_env.is_none());
+    let no_client_control = MySqlEndpointConfig::read(&no_client_control_path)?;
+    assert_eq!(no_client_control.host, missing_client.host);
+    assert_eq!(no_client_control.port, missing_client.port);
+    assert_eq!(no_client_control.tls, missing_client.tls);
+    assert!(inspect_live_endpoint(no_client_control)?
+        .tls_binding
+        .starts_with("hostname_verified;"));
+    for config in [wrong_hostname, untrusted_ca, missing_client] {
+        let error = inspect_live_endpoint(config).unwrap_err();
         let display = error.to_string();
         assert!(display.contains("MySQL operation failed"));
         for secret in [
