@@ -40,6 +40,15 @@
 > path. See
 > [12](./12-postgresql-first-adapter.md) for the exact boundary and support
 > matrix.
+> The feature also contains a narrow MySQL 8.0/8.4 execution path. It uses
+> separate source reader, source metadata administrator, freeze administrator,
+> target writer, and target metadata administrator accounts. It requires a
+> continuously attested external DML and DDL freeze, an exactly reviewed empty
+> target, and authenticated TLS. The current two-container matrix proves typed
+> table creation, bounded transactional copy, `AUTO_INCREMENT` restoration,
+> strict verification, durable completion, and completed-state resume. The
+> MySQL crash, cancellation, drift, and complete value matrices remain open, so
+> this is not the Phase 6 exit or a production support statement.
 
 ## Status and product boundary
 

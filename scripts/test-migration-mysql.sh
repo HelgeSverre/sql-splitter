@@ -18,6 +18,7 @@ fi
 
 run_id="${version//./}-$$-$RANDOM"
 container="sqlspl-migration-mysql-$run_id"
+target_container="sqlspl-migration-mysql-target-$run_id"
 test_dir=$(mktemp -d "$PWD/.sqlspl-mysql-test-${run_id}.XXXXXX")
 journal_dir=$(mktemp -d "$PWD/.sqlspl-mysql-journal-${run_id}.XXXXXX")
 test_dir=$(cd "$test_dir" && pwd -P)
@@ -30,6 +31,7 @@ cleanup() {
     kill "$lock_pid" >/dev/null 2>&1 || true
   fi
   docker rm -fv "$container" >/dev/null 2>&1 || true
+  docker rm -fv "$target_container" >/dev/null 2>&1 || true
   rm -rf "$test_dir"
   rm -rf "$journal_dir"
 }
@@ -85,6 +87,7 @@ docker exec -i "$container" mysql -uroot -prootpass <<'SQL'
 CREATE DATABASE migration_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE MIGRATION_SOURCE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_execution_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_source'@'%' IDENTIFIED BY 'sourcepass' REQUIRE X509;
 CREATE USER 'migration_target'@'%' IDENTIFIED BY 'targetpass' REQUIRE X509;
 CREATE USER 'migration_admin'@'%' IDENTIFIED BY 'adminpass' REQUIRE X509;
@@ -92,12 +95,14 @@ CREATE USER 'source_metadata_admin'@'%' IDENTIFIED BY 'sourcemetapass' REQUIRE X
 CREATE USER 'target_metadata_admin'@'%' IDENTIFIED BY 'targetmetapass' REQUIRE X509;
 CREATE USER 'business_reader'@'%' IDENTIFIED BY 'unusedpass' REQUIRE X509;
 CREATE USER 'partially_restricted_reader'@'%' IDENTIFIED BY 'unusedpass' REQUIRE X509;
+CREATE USER 'migration_execution_source'@'%' IDENTIFIED BY 'execsourcepass' REQUIRE X509;
 CREATE ROLE 'source_metadata_role'@'%';
 CREATE ROLE 'target_metadata_role'@'%';
 GRANT SELECT, SHOW VIEW ON migration_source.* TO 'migration_source'@'%';
 GRANT SELECT ON MIGRATION_SOURCE.* TO 'migration_source'@'%';
 GRANT ALL PRIVILEGES ON migration_target.* TO 'migration_target'@'%';
 GRANT ALL PRIVILEGES ON migration_source.* TO 'migration_admin'@'%';
+GRANT SELECT ON migration_execution_source.* TO 'migration_admin'@'%';
 GRANT PROCESS ON *.* TO 'migration_admin'@'%';
 GRANT SELECT ON performance_schema.* TO 'migration_admin'@'%';
 GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON *.* TO 'source_metadata_admin'@'%';
@@ -110,6 +115,7 @@ GRANT PROXY ON ''@'' TO 'migration_admin'@'%' WITH GRANT OPTION;
 SET PERSIST partial_revokes = ON;
 GRANT SELECT ON *.* TO 'partially_restricted_reader'@'%';
 REVOKE SELECT ON migration_source.* FROM 'partially_restricted_reader'@'%';
+GRANT SELECT, SHOW VIEW ON migration_execution_source.* TO 'migration_execution_source'@'%';
 FLUSH PRIVILEGES;
 USE migration_source;
 CREATE TABLE items (
@@ -135,16 +141,24 @@ CREATE TABLE auto_items (
 INSERT INTO auto_items(name) VALUES ('first');
 CREATE TABLE legacy (id BIGINT NOT NULL PRIMARY KEY) ENGINE=MyISAM;
 CREATE TABLE MIGRATION_SOURCE.case_collision (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+USE migration_execution_source;
+CREATE TABLE copy_items (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  payload VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO copy_items(id, payload) VALUES (1, 'one'), (2, 'two'), (3, 'three');
+ALTER TABLE copy_items AUTO_INCREMENT = 10;
 SQL
 
 write_config() {
   path=$1
-  database=$2
-  user=$3
-  credential_env=$4
+  endpoint_port=$2
+  database=$3
+  user=$4
+  credential_env=$5
   cat > "$path" <<EOF
 host = "127.0.0.1"
-port = $port
+port = $endpoint_port
 database = "$database"
 user = "$user"
 credential_env = "$credential_env"
@@ -165,11 +179,11 @@ target_config="$test_dir/target.toml"
 admin_config="$test_dir/admin.toml"
 source_metadata_config="$test_dir/source-metadata.toml"
 target_metadata_config="$test_dir/target-metadata.toml"
-write_config "$source_config" migration_source migration_source SQL_SPLITTER_MYSQL_SOURCE_PASSWORD
-write_config "$target_config" migration_target migration_target SQL_SPLITTER_MYSQL_TARGET_PASSWORD
-write_config "$admin_config" migration_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
-write_config "$source_metadata_config" migration_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD
-write_config "$target_metadata_config" migration_target target_metadata_admin SQL_SPLITTER_MYSQL_TARGET_METADATA_PASSWORD
+write_config "$source_config" "$port" migration_source migration_source SQL_SPLITTER_MYSQL_SOURCE_PASSWORD
+write_config "$target_config" "$port" migration_target migration_target SQL_SPLITTER_MYSQL_TARGET_PASSWORD
+write_config "$admin_config" "$port" migration_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
+write_config "$source_metadata_config" "$port" migration_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD
+write_config "$target_metadata_config" "$port" migration_target target_metadata_admin SQL_SPLITTER_MYSQL_TARGET_METADATA_PASSWORD
 
 export SQL_SPLITTER_MYSQL_SOURCE_PASSWORD=sourcepass
 export SQL_SPLITTER_MYSQL_TARGET_PASSWORD=targetpass
@@ -192,6 +206,60 @@ cargo test --no-default-features --features enterprise-migration-spike \
 cargo test --no-default-features --features enterprise-migration-spike \
   --test migration_mysql_plan_test live_mysql_metadata_visibility_contract \
   -- --ignored --exact --nocapture
+
+docker exec "$container" mysql -uroot -prootpass -Nse \
+  "DROP USER 'business_reader'@'%', 'partially_restricted_reader'@'%', 'migration_target'@'%', 'target_metadata_admin'@'%'; DROP ROLE 'target_metadata_role'@'%'"
+
+docker run -d --name "$target_container" \
+  -e MYSQL_ROOT_PASSWORD=rootpass \
+  -p 127.0.0.1::3306 \
+  --tmpfs /var/lib/mysql:rw,size=1g \
+  -v "$cert_dir:/certs:ro" \
+  "mysql:$version" \
+  --require-secure-transport=ON \
+  --ssl-ca=/certs/ca.pem \
+  --ssl-cert=/certs/server-cert.pem \
+  --ssl-key=/certs/server-key.pem >/dev/null
+target_port=$(docker port "$target_container" 3306/tcp | sed 's/.*://')
+for _ in $(seq 1 90); do
+  if docker exec "$target_container" mysql -uroot -prootpass -Nse 'SELECT 1' >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+docker exec "$target_container" mysql -uroot -prootpass -Nse 'SELECT 1' >/dev/null
+docker exec -i "$target_container" mysql -uroot -prootpass <<'SQL'
+CREATE DATABASE migration_execution_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE USER 'migration_execution_target'@'%' IDENTIFIED BY 'exectargetpass' REQUIRE X509;
+CREATE USER 'execution_target_metadata_admin'@'%' IDENTIFIED BY 'exectargetmetapass' REQUIRE X509;
+CREATE ROLE 'execution_target_metadata_role'@'%';
+GRANT ALL PRIVILEGES ON migration_execution_target.* TO 'migration_execution_target'@'%';
+GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON *.* TO 'execution_target_metadata_admin'@'%';
+GRANT SHOW_ROUTINE ON *.* TO 'execution_target_metadata_role'@'%';
+GRANT 'execution_target_metadata_role'@'%' TO 'execution_target_metadata_admin'@'%';
+SQL
+
+execution_source_config="$test_dir/execution-source.toml"
+execution_source_metadata_config="$test_dir/execution-source-metadata.toml"
+execution_freeze_config="$test_dir/execution-freeze.toml"
+execution_target_config="$test_dir/execution-target.toml"
+execution_target_metadata_config="$test_dir/execution-target-metadata.toml"
+write_config "$execution_source_config" "$port" migration_execution_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
+write_config "$execution_source_metadata_config" "$port" migration_execution_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD
+write_config "$execution_freeze_config" "$port" migration_execution_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
+write_config "$execution_target_config" "$target_port" migration_execution_target migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
+write_config "$execution_target_metadata_config" "$target_port" migration_execution_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD
+export SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD=execsourcepass
+export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD=exectargetpass
+export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD=exectargetmetapass
+export SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_CONFIG="$execution_source_config"
+export SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_METADATA_CONFIG="$execution_source_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_EXECUTION_FREEZE_CONFIG="$execution_freeze_config"
+export SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_CONFIG="$execution_target_config"
+export SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_METADATA_CONFIG="$execution_target_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_EXECUTION_PLAN_OUTPUT="$test_dir/execution-plan.json"
+export SQL_SPLITTER_MYSQL_TEST_FREEZE_ASSERTION_OUTPUT="$test_dir/freeze-assertion.json"
+export SQL_SPLITTER_MYSQL_TEST_EXECUTION_JOURNAL_OUTPUT="$journal_dir/execution-state.journal"
 
 docker exec "$container" mysql -uroot -prootpass -Nse \
   "SET PERSIST super_read_only = ON"
@@ -222,4 +290,8 @@ export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_HOST="$backup_lock_owner_host"
 
 cargo test --no-default-features --features enterprise-migration-spike \
   --test migration_mysql_plan_test live_mysql_external_freeze_attestation \
+  -- --ignored --exact --nocapture
+
+cargo test --no-default-features --features enterprise-migration-spike \
+  --test migration_mysql_plan_test live_mysql_two_container_execute_and_resume \
   -- --ignored --exact --nocapture

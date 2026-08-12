@@ -16,6 +16,8 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("probe-postgres-source-profile"));
     assert!(help.contains("plan-postgres"));
     assert!(help.contains("plan-mysql"));
+    assert!(help.contains("execute-mysql"));
+    assert!(help.contains("resume-mysql"));
     assert!(help.contains("execute-postgres"));
     assert!(help.contains("fence-install-postgres"));
     assert!(help.contains("fence-attest-postgres"));
@@ -37,6 +39,48 @@ fn help_is_explicitly_experimental_and_modes_are_isolated() {
     assert!(help.contains("write-fence"));
     assert!(!help.contains("--execute"));
     assert!(!help.contains("--approval-ref"));
+}
+
+#[test]
+fn mysql_execute_and_resume_require_mutation_and_verification_gates() {
+    let output = spike().args(["execute-mysql", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for required in [
+        "--plan-input",
+        "--source-config",
+        "--source-metadata-admin-config",
+        "--freeze-admin-config",
+        "--target-config",
+        "--target-metadata-admin-config",
+        "--external-freeze-assertion",
+        "--approval-ref",
+        "--state-output",
+        "--execute",
+        "--strict-verification",
+    ] {
+        assert!(help.contains(required));
+    }
+
+    let output = spike().args(["resume-mysql", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for required in [
+        "--state",
+        "--source-config",
+        "--source-metadata-admin-config",
+        "--freeze-admin-config",
+        "--target-config",
+        "--target-metadata-admin-config",
+        "--external-freeze-assertion",
+        "--execute",
+        "--strict-verification",
+    ] {
+        assert!(help.contains(required));
+    }
+    assert!(!help.contains("--plan-input"));
+    assert!(!help.contains("--approval-ref"));
+    assert!(!help.contains("--state-output"));
 }
 
 #[test]

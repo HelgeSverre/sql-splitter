@@ -96,7 +96,7 @@ enum Command {
         #[arg(long, value_enum)]
         consistency: ConsistencyMode,
     },
-    /// Inspect two live MySQL catalogs and write a blocked reviewed plan.
+    /// Inspect two live MySQL catalogs and write a reviewed plan.
     PlanMysql {
         /// Source endpoint TOML. Credentials are referenced through an environment variable.
         #[arg(long)]
@@ -119,6 +119,53 @@ enum Command {
         /// MySQL Phase 6 currently proves only the one-session consistent-snapshot arm.
         #[arg(long, value_enum)]
         consistency: ConsistencyMode,
+    },
+    /// Execute one reviewed same-dialect MySQL plan into an empty target.
+    ExecuteMysql {
+        #[arg(long)]
+        plan_input: PathBuf,
+        #[arg(long)]
+        source_config: PathBuf,
+        #[arg(long)]
+        source_metadata_admin_config: PathBuf,
+        #[arg(long)]
+        freeze_admin_config: PathBuf,
+        #[arg(long)]
+        target_config: PathBuf,
+        #[arg(long)]
+        target_metadata_admin_config: PathBuf,
+        /// Protected operator assertion for the continuously held external freeze.
+        #[arg(long)]
+        external_freeze_assertion: PathBuf,
+        #[arg(long)]
+        approval_ref: String,
+        #[arg(long)]
+        state_output: PathBuf,
+        #[arg(long, required = true)]
+        execute: bool,
+        #[arg(long, required = true)]
+        strict_verification: bool,
+    },
+    /// Resume only the reviewed intent embedded in an existing MySQL journal.
+    ResumeMysql {
+        #[arg(long)]
+        state: PathBuf,
+        #[arg(long)]
+        source_config: PathBuf,
+        #[arg(long)]
+        source_metadata_admin_config: PathBuf,
+        #[arg(long)]
+        freeze_admin_config: PathBuf,
+        #[arg(long)]
+        target_config: PathBuf,
+        #[arg(long)]
+        target_metadata_admin_config: PathBuf,
+        #[arg(long)]
+        external_freeze_assertion: PathBuf,
+        #[arg(long, required = true)]
+        execute: bool,
+        #[arg(long, required = true)]
+        strict_verification: bool,
     },
     /// Install and durably record the source fence required by a write-fence plan.
     FenceInstallPostgres {
@@ -370,7 +417,65 @@ fn main() -> anyhow::Result<()> {
                 plan.plan.unsupported_objects.objects.len(),
                 plan.plan.unsupported_objects.blocks_execution()
             );
-            eprintln!("MySQL execution remains blocked for every reported required semantic");
+            eprintln!("Every reported required MySQL semantic remains execution-blocking");
+        }
+        Command::ExecuteMysql {
+            plan_input,
+            source_config,
+            source_metadata_admin_config,
+            freeze_admin_config,
+            target_config,
+            target_metadata_admin_config,
+            external_freeze_assertion,
+            approval_ref,
+            state_output,
+            execute,
+            strict_verification,
+        } => {
+            if !execute || !strict_verification {
+                anyhow::bail!("--execute and --strict-verification are required");
+            }
+            let report = sql_splitter::migration::mysql_execution::execute_live_mysql_frozen_plan(
+                plan_input,
+                source_config,
+                source_metadata_admin_config,
+                freeze_admin_config,
+                target_config,
+                target_metadata_admin_config,
+                external_freeze_assertion,
+                &approval_ref,
+                &state_output,
+            )?;
+            println!("state: {}", report.state.display());
+            println!("copied rows: {}", report.copied_rows);
+            println!("committed chunks: {}", report.committed_chunks);
+        }
+        Command::ResumeMysql {
+            state,
+            source_config,
+            source_metadata_admin_config,
+            freeze_admin_config,
+            target_config,
+            target_metadata_admin_config,
+            external_freeze_assertion,
+            execute,
+            strict_verification,
+        } => {
+            if !execute || !strict_verification {
+                anyhow::bail!("--execute and --strict-verification are required");
+            }
+            let report = sql_splitter::migration::mysql_execution::resume_live_mysql_frozen_plan(
+                &state,
+                source_config,
+                source_metadata_admin_config,
+                freeze_admin_config,
+                target_config,
+                target_metadata_admin_config,
+                external_freeze_assertion,
+            )?;
+            println!("state: {}", report.state.display());
+            println!("copied rows: {}", report.copied_rows);
+            println!("committed chunks: {}", report.committed_chunks);
         }
         Command::FenceInstallPostgres {
             plan_input,

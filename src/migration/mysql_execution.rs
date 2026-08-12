@@ -4,17 +4,25 @@
 //! journal intent and is inspected independently after any error or restart.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use sha2::{Digest, Sha256};
 
-use super::append_journal::{AppendJournal, CommittedChunkIter, PreparedChunk};
-use super::canonical::{digest_rows, CanonicalRow};
+use super::append_journal::{
+    AppendJournal, CommittedChunkIter, Genesis, OperationPhase, OperationSpec, PreparedChunk,
+};
+use super::artifact::read_json;
+use super::canonical::{digest_rows, CanonicalRow, CANONICAL_ENCODING_VERSION};
 use super::connection::{
     CancellationToken, ConnectionError, ConnectionResult, KeysetPage, ReadSession,
     SourceConnectionFactory, TargetConnectionFactory, VerificationSession,
 };
-use super::journal::{MigrationStatus, OperationState};
+use super::journal::{ConsistencyEvidence, MigrationStatus, OperationState, ResumeBinding};
 use super::model::{DbValue, Identifier, KeyTuple, QualifiedTable, RowBatch, VendorCatalog};
 use super::mysql::{
     attest_mysql_external_freeze, collect_mysql_metadata_visibility, mysql_auto_increment_states,
@@ -377,6 +385,356 @@ pub struct MySqlExecutionAdminConfigs<'a> {
     pub target_metadata: &'a MySqlEndpointConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MySqlExecutionReport {
+    pub state: PathBuf,
+    pub copied_rows: u64,
+    pub committed_chunks: u64,
+}
+
+struct MySqlCancellationMonitor {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl MySqlCancellationMonitor {
+    fn start(
+        source: Arc<MySqlSourceFactory>,
+        target: Arc<MySqlTargetFactory>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) && !cancellation.is_cancelled() {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if worker_stop.load(Ordering::Acquire) {
+                return;
+            }
+            let mut errors = Vec::new();
+            for (label, control) in [
+                ("source", source.open_control()),
+                ("target", target.open_control()),
+            ] {
+                match control {
+                    Ok(mut control) => {
+                        if let Err(error) = control.cancel_active_statement() {
+                            if !matches!(error, ConnectionError::InvalidRequest(_)) {
+                                errors.push(format!("{label}: {error}"));
+                            }
+                        }
+                    }
+                    Err(error) if !matches!(error, ConnectionError::InvalidRequest(_)) => {
+                        errors.push(format!("{label} control: {error}"));
+                    }
+                    Err(_) => {}
+                }
+            }
+            if !errors.is_empty() {
+                cancellation.record_control_error(errors.join("; "));
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for MySqlCancellationMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_live_mysql_frozen_plan(
+    plan_path: impl AsRef<Path>,
+    source_config_path: impl AsRef<Path>,
+    source_metadata_config_path: impl AsRef<Path>,
+    freeze_config_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    target_metadata_config_path: impl AsRef<Path>,
+    freeze_assertion_path: impl AsRef<Path>,
+    approval_reference: &str,
+    state_path: impl AsRef<Path>,
+) -> anyhow::Result<MySqlExecutionReport> {
+    if approval_reference.trim().is_empty() {
+        return Err(anyhow!("approval reference must not be empty"));
+    }
+    let cancellation = CancellationToken::default();
+    cancellation.observe_process_sigint()?;
+    let reviewed: ReviewedPlan = read_json(plan_path)?;
+    reviewed.validate()?;
+    reviewed.plan.validate_for_execution()?;
+    let source_config = MySqlEndpointConfig::read(source_config_path.as_ref())?;
+    let source_metadata_config = MySqlEndpointConfig::read(source_metadata_config_path.as_ref())?;
+    let freeze_config = MySqlEndpointConfig::read(freeze_config_path.as_ref())?;
+    let target_config = MySqlEndpointConfig::read(target_config_path.as_ref())?;
+    let target_metadata_config = MySqlEndpointConfig::read(target_metadata_config_path.as_ref())?;
+    validate_mysql_execution_credential_separation(
+        &source_config,
+        &source_metadata_config,
+        &freeze_config,
+        &target_config,
+        &target_metadata_config,
+    )?;
+    let assertion: MySqlExternalFreezeAssertion = read_json(freeze_assertion_path)?;
+    let accepted = attest_mysql_external_freeze(&freeze_config, &reviewed, &assertion)?;
+    let source = Arc::new(MySqlSourceFactory::new_with_cancellation(
+        source_config,
+        cancellation.clone(),
+    ));
+    let source_catalog = reviewed
+        .plan
+        .source_catalog
+        .clone()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no source catalog"))?;
+    let target_evidence = reviewed
+        .plan
+        .mysql_target_snapshot_evidence
+        .clone()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no target snapshot evidence"))?;
+    let target = Arc::new(MySqlTargetFactory::new_with_cancellation(
+        target_config,
+        source_catalog,
+        target_evidence,
+        cancellation.clone(),
+    )?);
+    source.capabilities().require(&[
+        "consistent_snapshot",
+        "server_read_only",
+        "transactions",
+        "cancellation",
+        "typed_identifiers",
+        "bound_parameters",
+    ])?;
+    target.capabilities().require(&[
+        "transactions",
+        "cancellation",
+        "typed_identifiers",
+        "bound_parameters",
+        "plain_insert",
+    ])?;
+    let _monitor = MySqlCancellationMonitor::start(
+        Arc::clone(&source),
+        Arc::clone(&target),
+        cancellation.clone(),
+    );
+    attest_initial_mysql_target(&reviewed, target.endpoint_config(), &target_metadata_config)?;
+    target
+        .assert_empty()
+        .context("require the reviewed MySQL target to remain empty before execution")?;
+    let binding = mysql_resume_binding(&reviewed, &accepted, approval_reference)?;
+    let mut journal = AppendJournal::create_new(
+        state_path.as_ref(),
+        mysql_journal_genesis(binding, reviewed.clone(), accepted),
+    )?;
+    execute_mysql_frozen_plan(
+        &reviewed,
+        source.as_ref(),
+        target.as_ref(),
+        &mut journal,
+        &cancellation,
+        MySqlExecutionAdminConfigs {
+            freeze: &freeze_config,
+            source_metadata: &source_metadata_config,
+            target_metadata: &target_metadata_config,
+        },
+        &assertion,
+    )?;
+    mysql_execution_report(state_path.as_ref(), &journal)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resume_live_mysql_frozen_plan(
+    state_path: impl AsRef<Path>,
+    source_config_path: impl AsRef<Path>,
+    source_metadata_config_path: impl AsRef<Path>,
+    freeze_config_path: impl AsRef<Path>,
+    target_config_path: impl AsRef<Path>,
+    target_metadata_config_path: impl AsRef<Path>,
+    freeze_assertion_path: impl AsRef<Path>,
+) -> anyhow::Result<MySqlExecutionReport> {
+    let cancellation = CancellationToken::default();
+    cancellation.observe_process_sigint()?;
+    let mut journal = AppendJournal::open_resume(state_path.as_ref())?;
+    let reviewed = journal.reviewed_plan().clone();
+    reviewed.validate()?;
+    reviewed.plan.validate_for_execution()?;
+    let source_config = MySqlEndpointConfig::read(source_config_path.as_ref())?;
+    let source_metadata_config = MySqlEndpointConfig::read(source_metadata_config_path.as_ref())?;
+    let freeze_config = MySqlEndpointConfig::read(freeze_config_path.as_ref())?;
+    let target_config = MySqlEndpointConfig::read(target_config_path.as_ref())?;
+    let target_metadata_config = MySqlEndpointConfig::read(target_metadata_config_path.as_ref())?;
+    validate_mysql_execution_credential_separation(
+        &source_config,
+        &source_metadata_config,
+        &freeze_config,
+        &target_config,
+        &target_metadata_config,
+    )?;
+    let assertion: MySqlExternalFreezeAssertion = read_json(freeze_assertion_path)?;
+    let source = Arc::new(MySqlSourceFactory::new_with_cancellation(
+        source_config,
+        cancellation.clone(),
+    ));
+    let source_catalog = reviewed
+        .plan
+        .source_catalog
+        .clone()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no source catalog"))?;
+    let target_evidence = reviewed
+        .plan
+        .mysql_target_snapshot_evidence
+        .clone()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no target snapshot evidence"))?;
+    let target = Arc::new(MySqlTargetFactory::new_with_cancellation(
+        target_config,
+        source_catalog,
+        target_evidence,
+        cancellation.clone(),
+    )?);
+    source.capabilities().require(&[
+        "consistent_snapshot",
+        "server_read_only",
+        "transactions",
+        "cancellation",
+        "typed_identifiers",
+        "bound_parameters",
+    ])?;
+    target.capabilities().require(&[
+        "transactions",
+        "cancellation",
+        "typed_identifiers",
+        "bound_parameters",
+        "plain_insert",
+    ])?;
+    let _monitor = MySqlCancellationMonitor::start(
+        Arc::clone(&source),
+        Arc::clone(&target),
+        cancellation.clone(),
+    );
+    execute_mysql_frozen_plan(
+        &reviewed,
+        source.as_ref(),
+        target.as_ref(),
+        &mut journal,
+        &cancellation,
+        MySqlExecutionAdminConfigs {
+            freeze: &freeze_config,
+            source_metadata: &source_metadata_config,
+            target_metadata: &target_metadata_config,
+        },
+        &assertion,
+    )?;
+    mysql_execution_report(state_path.as_ref(), &journal)
+}
+
+fn mysql_resume_binding(
+    reviewed: &ReviewedPlan,
+    accepted: &MySqlExternalFreezeAttestation,
+    approval_reference: &str,
+) -> anyhow::Result<ResumeBinding> {
+    let target_endpoint = reviewed
+        .plan
+        .target_endpoint_identity
+        .as_assessed()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no target endpoint"))?
+        .clone();
+    let target_fingerprint = reviewed
+        .plan
+        .target_catalog_fingerprint
+        .as_assessed()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no target catalog fingerprint"))?
+        .clone();
+    Ok(ResumeBinding {
+        migration_id: reviewed.plan.migration_id.clone(),
+        plan_hash: reviewed.plan_hash.to_string(),
+        approval_reference: approval_reference.into(),
+        tool_version: reviewed.plan.tool_version.clone(),
+        source_endpoint: reviewed.plan.source_endpoint_identity.clone(),
+        target_endpoint,
+        consistency_evidence: ConsistencyEvidence::MySqlExternalFreeze {
+            endpoint_identity: accepted.source_endpoint_identity.clone(),
+            database_identity: accepted.source_database_identity.clone(),
+            server_uuid: accepted.server_uuid.clone(),
+            source_catalog_fingerprint: accepted.source_catalog_fingerprint.clone(),
+            profile_generation: accepted.profile_generation.clone(),
+            continuity_token_hash: accepted.continuity_token_hash.clone(),
+            backup_lock_connection_id: accepted.backup_lock_connection_id,
+        },
+        source_schema_fingerprint: reviewed.plan.source_catalog_fingerprint.clone(),
+        target_schema_fingerprint: target_fingerprint,
+        outage_projection_digest: None,
+        external_quiesce_attestation_digest: None,
+        mysql_freeze_attestation_digest: Some(accepted.canonical_hash()?),
+        conversion_policy: reviewed.plan.conversion_policy.clone(),
+        canonical_encoding_version: CANONICAL_ENCODING_VERSION,
+    })
+}
+
+fn mysql_journal_genesis(
+    binding: ResumeBinding,
+    reviewed: ReviewedPlan,
+    accepted: MySqlExternalFreezeAttestation,
+) -> Genesis {
+    let operations = reviewed
+        .plan
+        .operations
+        .iter()
+        .map(|operation| OperationSpec {
+            operation_id: operation.id.to_string(),
+            dependencies: operation
+                .dependencies
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            is_copy: operation.kind == OperationKind::CopyTable,
+            phase: if matches!(
+                operation.kind,
+                OperationKind::VerifyTable | OperationKind::VerifySchema
+            ) {
+                OperationPhase::Verification
+            } else {
+                OperationPhase::Execution
+            },
+        })
+        .collect();
+    Genesis {
+        binding,
+        reviewed_plan: reviewed,
+        accepted_outage_projection: None,
+        accepted_external_quiesce: None,
+        accepted_mysql_freeze: Some(accepted),
+        operations,
+    }
+}
+
+fn mysql_execution_report(
+    state_path: &Path,
+    journal: &AppendJournal,
+) -> anyhow::Result<MySqlExecutionReport> {
+    if journal.projection().status != MigrationStatus::Completed {
+        return Err(anyhow!("MySQL migration did not reach Completed state"));
+    }
+    let copied_rows = journal
+        .projection()
+        .copy_cursors
+        .values()
+        .try_fold(0_u64, |total, cursor| total.checked_add(cursor.rows))
+        .ok_or_else(|| anyhow!("MySQL copied-row count overflow"))?;
+    Ok(MySqlExecutionReport {
+        state: state_path.to_path_buf(),
+        copied_rows,
+        committed_chunks: journal.projection().last_chunk_id,
+    })
+}
+
 /// Execute or resume the reviewed MySQL plan while continuously re-attesting
 /// the externally owned source freeze. The journal must have been created with
 /// the same reviewed plan and accepted freeze attestation.
@@ -624,6 +982,47 @@ fn attest_current_mysql_target_visibility(
     {
         return Err(anyhow!(
             "current MySQL target metadata visibility, grants, roles, partial revokes, or catalog differs from the reviewed contract"
+        ));
+    }
+    Ok(())
+}
+
+fn attest_initial_mysql_target(
+    reviewed: &ReviewedPlan,
+    target_config: &MySqlEndpointConfig,
+    metadata_admin_config: &MySqlEndpointConfig,
+) -> anyhow::Result<()> {
+    let current_target = super::mysql::inspect_live_endpoint(target_config.clone())?;
+    let current = collect_mysql_metadata_visibility(
+        &current_target,
+        target_config,
+        metadata_admin_config,
+        None,
+    )?;
+    let accepted_visibility = reviewed
+        .plan
+        .mysql_target_metadata_visibility
+        .as_ref()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no target metadata-visibility evidence"))?;
+    let accepted_catalog = reviewed
+        .plan
+        .target_catalog
+        .as_assessed()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no target catalog"))?;
+    let accepted_fingerprint = reviewed
+        .plan
+        .target_catalog_fingerprint
+        .as_assessed()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no target catalog fingerprint"))?;
+    let current_fingerprint = mysql_catalog_fingerprint(&current.authoritative_catalog)?;
+    if current.evidence != *accepted_visibility
+        || current.authoritative_catalog != *accepted_catalog
+        || current_fingerprint != *accepted_fingerprint
+        || !super::mysql::mysql_catalog_visibility_is_complete(&current_target, &current)?
+        || !current.authoritative_blockers.is_empty()
+    {
+        return Err(anyhow!(
+            "current MySQL target catalog, visibility, or authorization differs from the reviewed empty target"
         ));
     }
     Ok(())

@@ -1,7 +1,7 @@
 #![cfg(feature = "enterprise-migration-spike")]
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mysql::prelude::Queryable;
 use mysql::{Conn, OptsBuilder, SslOpts};
@@ -9,7 +9,7 @@ use mysql::{Conn, OptsBuilder, SslOpts};
 use sql_splitter::migration::append_journal::{
     AppendJournal, Genesis, OperationPhase, OperationSpec,
 };
-use sql_splitter::migration::artifact::read_json;
+use sql_splitter::migration::artifact::{read_json, write_json_new};
 use sql_splitter::migration::canonical::CANONICAL_ENCODING_VERSION;
 use sql_splitter::migration::connection::{
     CancellationToken, KeysetPage, SourceConnectionFactory, TargetConnectionFactory,
@@ -22,10 +22,13 @@ use sql_splitter::migration::mysql::{
     attest_mysql_external_freeze, build_plan, build_plan_with_visibility,
     collect_mysql_metadata_visibility, inspect_live_endpoint, mysql_auto_increment_states,
     mysql_catalog_fingerprint, mysql_table_definitions, mysql_tls_binding,
-    validate_mysql_external_freeze_continuity, write_live_plan, MySqlEndpointConfig,
-    MySqlSourceFactory, MySqlTableState, MySqlTargetFactory, MYSQL_CONSISTENCY_SNAPSHOT,
+    validate_mysql_external_freeze_continuity, write_live_plan, write_live_plan_with_visibility,
+    MySqlEndpointConfig, MySqlSourceFactory, MySqlTableState, MySqlTargetFactory,
+    MYSQL_CONSISTENCY_SNAPSHOT,
 };
-use sql_splitter::migration::mysql_execution::reconcile_mysql_pre_data_schema;
+use sql_splitter::migration::mysql_execution::{
+    execute_live_mysql_frozen_plan, reconcile_mysql_pre_data_schema, resume_live_mysql_frozen_plan,
+};
 use sql_splitter::migration::mysql_profile::{
     MySqlDdlFreezeMechanism, MySqlDmlFreezeMechanism, MySqlExternalFreezeAssertion,
     MySqlExternalFreezeAttestation, MySqlFreezeAttestationStatus, MySqlFreezeProfileKind,
@@ -146,6 +149,105 @@ fn live_mysql_metadata_visibility_contract() -> anyhow::Result<()> {
         .objects
         .iter()
         .any(|object| object.object_kind == "privilege"));
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
+fn live_mysql_two_container_execute_and_resume() -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_CONFIG")?;
+    let source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_FREEZE_CONFIG")?;
+    let target_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_CONFIG")?;
+    let target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_METADATA_CONFIG")?;
+    let plan_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_PLAN_OUTPUT")?;
+    let assertion_path = required_path("SQL_SPLITTER_MYSQL_TEST_FREEZE_ASSERTION_OUTPUT")?;
+    let journal_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_JOURNAL_OUTPUT")?;
+
+    let reviewed = write_live_plan_with_visibility(
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &plan_path,
+    )?;
+    assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let assertion = MySqlExternalFreezeAssertion {
+        schema_version: MYSQL_FREEZE_ASSERTION_SCHEMA_VERSION,
+        profile_generation: "two-container-execution-v1".into(),
+        provider_reference: "disposable-mysql-matrix".into(),
+        activated_at_unix_seconds: now.saturating_sub(30),
+        expires_at_unix_seconds: now.saturating_add(600),
+        continuity_token_hash: "c".repeat(64),
+        backup_lock_connection_id: std::env::var("SQL_SPLITTER_MYSQL_BACKUP_LOCK_CONNECTION_ID")?
+            .parse()?,
+        backup_lock_owner_user: std::env::var("SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_USER")?,
+        backup_lock_owner_host: std::env::var("SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_HOST")?,
+    };
+    write_json_new(&assertion_path, &assertion)?;
+
+    let target_config = MySqlEndpointConfig::read(&target_path)?;
+    let mut target = connect(&target_config)?;
+    target.query_drop(
+        "CREATE TABLE migration_execution_target.unreviewed_target_object (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB",
+    )?;
+    let error = execute_live_mysql_frozen_plan(
+        &plan_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+        "live-two-container-approval",
+        &journal_path,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("differs from the reviewed empty target"));
+    assert!(!journal_path.exists());
+    target.query_drop("DROP TABLE migration_execution_target.unreviewed_target_object")?;
+
+    let report = execute_live_mysql_frozen_plan(
+        &plan_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+        "live-two-container-approval",
+        &journal_path,
+    )?;
+    assert_eq!(report.copied_rows, 3);
+    assert_eq!(report.committed_chunks, 2);
+    let rows: Vec<(i64, String)> = target
+        .query("SELECT id, payload FROM migration_execution_target.copy_items ORDER BY id")?;
+    assert_eq!(
+        rows,
+        vec![(1, "one".into()), (2, "two".into()), (3, "three".into()),]
+    );
+    let next_value: Option<u64> = target.query_first(
+        "SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'migration_execution_target' AND TABLE_NAME = 'copy_items'",
+    )?;
+    assert_eq!(next_value, Some(10));
+
+    let resumed = resume_live_mysql_frozen_plan(
+        &journal_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+    )?;
+    assert_eq!(resumed.copied_rows, 3);
+    assert_eq!(resumed.committed_chunks, 2);
     Ok(())
 }
 
