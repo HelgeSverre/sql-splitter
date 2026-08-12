@@ -222,8 +222,9 @@ defines:
 - float width and IEEE bits, with explicit canonical forms for NaN, signed zero,
   and infinities;
 - date/time fields, timezone semantics, offset, and declared precision;
-- JSON parsed and serialized with sorted object keys, preserved array order,
-  defined number handling, and duplicate-key rejection;
+- JSON parsed and serialized with decoded object keys in Unicode order,
+  preserved array order, exact coefficient-and-exponent number normalization,
+  and duplicate-key rejection before canonical framing;
 - catalog column order and complete key tuples.
 
 Exact test vectors version this format. XXH3 may be used later as a fast

@@ -30,7 +30,7 @@ use super::assessment::{
     AssessmentError, EvidenceStatus, ExecutionRequirement, ScopeEstimate, SourceAssessmentEvidence,
     ThroughputProfile, ASSESSMENT_SCHEMA_VERSION,
 };
-use super::canonical::CANONICAL_ENCODING_VERSION;
+use super::canonical::{canonicalize_json, CANONICAL_ENCODING_VERSION};
 use super::connection::{
     CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult,
     ControlSession, KeysetPage, ReadOnlyEvidence, ReadSession, SnapshotToken,
@@ -4191,12 +4191,15 @@ fn write_parameter(value: &DbValue, ty: &Type) -> ConnectionResult<Box<dyn ToSql
         })),
         DbValue::Json(value) if *ty == Type::JSON => Ok(Box::new(RawParameter {
             oid: ty.oid(),
-            bytes: value.clone(),
+            bytes: canonicalize_json(value)
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
         })),
         DbValue::Json(value) if *ty == Type::JSONB => {
+            let value = canonicalize_json(value)
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
             let mut bytes = Vec::with_capacity(value.len() + 1);
             bytes.push(1);
-            bytes.extend_from_slice(value);
+            bytes.extend_from_slice(&value);
             Ok(Box::new(RawParameter {
                 oid: ty.oid(),
                 bytes,
@@ -4583,8 +4586,20 @@ fn decode_value(ty: &Type, raw: Option<RawBinary>) -> ConnectionResult<DbValue> 
             bytes.try_into().map_err(|_| invalid())?,
         ))),
         Type::BYTEA => Ok(DbValue::Bytes(bytes)),
-        Type::JSON => Ok(DbValue::Json(bytes)),
-        Type::JSONB if bytes.first() == Some(&1) => Ok(DbValue::Json(bytes[1..].to_vec())),
+        Type::JSON => canonicalize_json(&bytes)
+            .map(DbValue::Json)
+            .map_err(|error| {
+                ConnectionError::Database(format!(
+                    "invalid canonical JSON for PostgreSQL {ty}: {error}"
+                ))
+            }),
+        Type::JSONB if bytes.first() == Some(&1) => canonicalize_json(&bytes[1..])
+            .map(DbValue::Json)
+            .map_err(|error| {
+                ConnectionError::Database(format!(
+                    "invalid canonical JSON for PostgreSQL {ty}: {error}"
+                ))
+            }),
         Type::JSONB => Err(invalid()),
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::XML => {
             String::from_utf8(bytes)
@@ -8293,6 +8308,18 @@ credential_env = "PGPASSWORD"
         ));
         assert!(matches!(
             decode_value(&Type::JSONB, Some(RawBinary(vec![2, b'{', b'}']))),
+            Err(ConnectionError::Database(_))
+        ));
+        assert_eq!(
+            decode_value(
+                &Type::JSON,
+                Some(RawBinary(br#"{"b":1.00,"a":1e0}"#.to_vec()))
+            )
+            .unwrap(),
+            DbValue::Json(br#"{"a":1,"b":1}"#.to_vec())
+        );
+        assert!(matches!(
+            decode_value(&Type::JSON, Some(RawBinary(br#"{"a":1,"a":2}"#.to_vec()))),
             Err(ConnectionError::Database(_))
         ));
     }

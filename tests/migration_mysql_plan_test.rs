@@ -21,7 +21,9 @@ use sql_splitter::migration::append_journal::{
     AppendJournal, Genesis, OperationPhase, OperationSpec,
 };
 use sql_splitter::migration::artifact::{read_json, write_json_new};
-use sql_splitter::migration::canonical::CANONICAL_ENCODING_VERSION;
+use sql_splitter::migration::canonical::{
+    canonicalize_json, digest_rows, CanonicalRow, CANONICAL_ENCODING_VERSION,
+};
 use sql_splitter::migration::connection::{
     CancellationToken, KeysetPage, SourceConnectionFactory, TargetConnectionFactory,
 };
@@ -261,6 +263,308 @@ fn live_mysql_two_container_execute_and_resume() -> anyhow::Result<()> {
     assert_eq!(resumed.copied_rows, 3);
     assert_eq!(resumed.committed_chunks, 2);
     Ok(())
+}
+
+#[test]
+#[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
+fn live_mysql_canonical_value_matrix() -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_SOURCE_CONFIG")?;
+    let source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_FREEZE_CONFIG")?;
+    let target_path = required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_TARGET_CONFIG")?;
+    let target_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_TARGET_METADATA_CONFIG")?;
+    let plan_path = required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_PLAN_OUTPUT")?;
+    let assertion_path = required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_ASSERTION_OUTPUT")?;
+    let journal_path = required_path("SQL_SPLITTER_MYSQL_TEST_VALUES_JOURNAL_OUTPUT")?;
+
+    let reviewed = write_live_plan_with_visibility(
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &plan_path,
+    )?;
+    assert!(
+        !reviewed.plan.unsupported_objects.blocks_execution(),
+        "unexpected value-matrix blockers: {:#?}",
+        reviewed.plan.unsupported_objects.objects
+    );
+    assert_eq!(
+        reviewed.plan.canonical_encoding_version,
+        CANONICAL_ENCODING_VERSION
+    );
+    write_live_freeze_assertion(&assertion_path, "mysql-canonical-values-v2")?;
+
+    let report = execute_live_mysql_frozen_plan(
+        &plan_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+        "live-canonical-value-approval",
+        &journal_path,
+    )?;
+    assert_eq!(report.copied_rows, 3);
+    assert_eq!(report.committed_chunks, 2);
+
+    let source_config = MySqlEndpointConfig::read(&source_path)?;
+    let target_config = MySqlEndpointConfig::read(&target_path)?;
+    let projection = mysql_value_projection()?;
+    let (source_columns, source_rows) = read_mysql_value_rows(&source_config, &projection)?;
+    let (target_columns, target_rows) = read_mysql_value_rows(&target_config, &projection)?;
+    assert_eq!(
+        source_columns
+            .iter()
+            .map(|column| &column.name)
+            .collect::<Vec<_>>(),
+        projection.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(target_columns, source_columns);
+    assert_eq!(target_rows, source_rows);
+    assert_eq!(source_rows.len(), 3);
+    assert_eq!(
+        source_columns[14].timezone_semantics.as_deref(),
+        Some("local_without_offset")
+    );
+    assert_eq!(
+        source_columns[16].timezone_semantics.as_deref(),
+        Some("mysql_session_time_zone")
+    );
+    assert_eq!(source_columns[14].scale, Some(6));
+    assert_eq!(source_columns[15].scale, Some(0));
+    assert_eq!(source_columns[16].scale, Some(6));
+    assert_eq!(source_columns[17].scale, Some(0));
+    assert_eq!(source_columns[18].scale, Some(6));
+
+    assert_eq!(source_rows[0][1], DbValue::Null);
+    assert_eq!(source_rows[0][2], DbValue::Text("Unicode: åß水🧪".into()));
+    assert_eq!(source_rows[0][3], DbValue::Signed(-128));
+    assert_eq!(source_rows[0][4], DbValue::Signed(-32_768));
+    assert_eq!(source_rows[0][5], DbValue::Signed(-8_388_608));
+    assert_eq!(source_rows[0][6], DbValue::Signed(-2_147_483_648));
+    assert_eq!(source_rows[0][7], DbValue::Signed(i64::MIN.into()));
+    assert_eq!(source_rows[1][3], DbValue::Signed(127));
+    assert_eq!(source_rows[1][4], DbValue::Signed(32_767));
+    assert_eq!(source_rows[1][5], DbValue::Signed(8_388_607));
+    assert_eq!(source_rows[1][6], DbValue::Signed(2_147_483_647));
+    assert_eq!(source_rows[1][7], DbValue::Signed(i64::MAX.into()));
+    assert_eq!(source_rows[1][8], DbValue::Unsigned(u64::MAX.into()));
+    assert_eq!(source_rows[0][12], DbValue::Bytes(vec![0, 1]));
+    assert_eq!(source_rows[1][12], DbValue::Bytes(vec![1, 255]));
+    assert_eq!(
+        source_rows[0][13],
+        DbValue::Date {
+            year: 1000,
+            month: 1,
+            day: 1,
+        }
+    );
+    assert_eq!(
+        source_rows[0][14],
+        DbValue::Timestamp {
+            local: "2000-02-29 10:11:12.123456".into(),
+            offset_minutes: None,
+            precision: 6,
+        }
+    );
+    assert_eq!(
+        source_rows[0][15],
+        DbValue::Timestamp {
+            local: "2000-02-29 10:11:12.000000".into(),
+            offset_minutes: None,
+            precision: 0,
+        }
+    );
+    assert_eq!(
+        source_rows[0][16],
+        DbValue::Timestamp {
+            local: "2000-02-29 10:11:12.123456".into(),
+            offset_minutes: None,
+            precision: 6,
+        }
+    );
+    assert_eq!(
+        source_rows[0][18],
+        DbValue::Time {
+            nanos: -(838_i128 * 3_600 + 59 * 60 + 59) * 1_000_000_000,
+        }
+    );
+    assert_eq!(source_rows[0][19], DbValue::Signed(1901));
+    assert_eq!(
+        source_rows[2][9],
+        DbValue::Decimal {
+            coefficient: b"100000000".to_vec(),
+            scale: 10,
+        }
+    );
+    // MySQL normalizes negative zero when it stores FLOAT and DOUBLE. The
+    // canonical encoder still distinguishes the bit patterns for adapters
+    // whose server exposes them; this matrix binds MySQL's observed value.
+    assert_eq!(source_rows[0][10], DbValue::Float32(0.0f32.to_bits()));
+    assert_eq!(source_rows[0][11], DbValue::Float64(0.0f64.to_bits()));
+    assert_eq!(source_rows[0][20], DbValue::Bytes(vec![0, 255, 16]));
+    assert_eq!(
+        source_rows[0][22],
+        DbValue::Json(canonicalize_json(br#"{"a":1,"z":1}"#)?)
+    );
+    assert_eq!(
+        source_rows[1][22],
+        DbValue::Json(canonicalize_json(
+            br#"{"array":[1,1,1,null,true,false],"nested":{"a":1,"z":0}}"#
+        )?)
+    );
+    assert_eq!(
+        source_rows[2][22],
+        DbValue::Json(canonicalize_json(br#"{"duplicate":2,"number":1}"#)?)
+    );
+
+    let journal = AppendJournal::open_resume(&journal_path)?;
+    assert_eq!(
+        journal.genesis().binding.canonical_encoding_version,
+        CANONICAL_ENCODING_VERSION
+    );
+    let committed = journal
+        .all_committed_chunks()?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(committed.len(), 2);
+    assert_eq!(committed[0].final_key, vec![DbValue::Signed(2)]);
+    assert_eq!(committed[1].final_key, vec![DbValue::Signed(3)]);
+    let column_names = source_columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>();
+    let mut first = 0usize;
+    for chunk in &committed {
+        let count = usize::try_from(chunk.row_count)?;
+        let last = first + count;
+        assert_eq!(
+            chunk.canonical_digest,
+            mysql_value_rows_digest(
+                "migration_values_source.value_matrix",
+                &column_names,
+                &source_rows[first..last],
+            )?
+        );
+        first = last;
+    }
+    assert_eq!(first, source_rows.len());
+    drop(journal);
+
+    let resumed = resume_live_mysql_frozen_plan(
+        &journal_path,
+        &source_path,
+        &source_metadata_path,
+        &freeze_path,
+        &target_path,
+        &target_metadata_path,
+        &assertion_path,
+    )?;
+    assert_eq!(resumed.copied_rows, 3);
+    assert_eq!(resumed.committed_chunks, 2);
+    Ok(())
+}
+
+fn mysql_value_projection() -> anyhow::Result<Vec<Identifier>> {
+    Ok([
+        "id",
+        "nullable_value",
+        "unicode_value",
+        "tiny_value",
+        "small_value",
+        "medium_value",
+        "int_value",
+        "big_value",
+        "unsigned_big_value",
+        "decimal_value",
+        "float_value",
+        "double_value",
+        "bit_value",
+        "date_value",
+        "datetime6_value",
+        "datetime0_value",
+        "timestamp6_value",
+        "timestamp0_value",
+        "time6_value",
+        "year_value",
+        "binary_value",
+        "blob_value",
+        "json_value",
+    ]
+    .into_iter()
+    .map(Identifier::new)
+    .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn read_mysql_value_rows(
+    config: &MySqlEndpointConfig,
+    projection: &[Identifier],
+) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<DbValue>>)> {
+    let factory = MySqlSourceFactory::new(config.clone());
+    let snapshot = factory.capture_snapshot()?;
+    let mut reader = factory.open_reader(&snapshot, CancellationToken::default())?;
+    let table = QualifiedTable {
+        namespace: Identifier::new(config.database.clone())?,
+        name: identifier("value_matrix"),
+    };
+    let mut after = None;
+    let mut columns = None;
+    let mut rows = Vec::new();
+    loop {
+        let batch = reader.select_page(&KeysetPage {
+            table: table.clone(),
+            projection: projection.to_vec(),
+            key: vec![identifier("id")],
+            after,
+            limit: u32::MAX,
+        })?;
+        if batch.is_empty() {
+            break;
+        }
+        if let Some(existing) = &columns {
+            assert_eq!(existing, batch.columns());
+        } else {
+            columns = Some(batch.columns().to_vec());
+        }
+        let final_key = batch
+            .rows()
+            .last()
+            .and_then(|row| row.first())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("MySQL value page has no complete final key"))?;
+        after = Some(KeyTuple::new(vec![final_key]));
+        rows.extend(batch.rows().iter().cloned());
+    }
+    Ok((
+        columns.ok_or_else(|| anyhow::anyhow!("MySQL value matrix is unexpectedly empty"))?,
+        rows,
+    ))
+}
+
+fn mysql_value_rows_digest(
+    table: &str,
+    columns: &[&str],
+    rows: &[Vec<DbValue>],
+) -> anyhow::Result<String> {
+    let keys = rows
+        .iter()
+        .map(|row| vec![row[0].clone()])
+        .collect::<Vec<_>>();
+    let canonical = rows
+        .iter()
+        .zip(&keys)
+        .map(|(row, key)| CanonicalRow {
+            table,
+            columns,
+            key,
+            values: row,
+        })
+        .collect::<Vec<_>>();
+    Ok(hex::encode(digest_rows(canonical.iter())?))
 }
 
 #[cfg(feature = "migration-fault-injection")]

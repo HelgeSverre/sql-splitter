@@ -3999,7 +3999,7 @@ fn batch_digest(
             values: row,
         })
         .collect::<Vec<_>>();
-    Ok(hex::encode(digest_rows(canonical.iter())))
+    Ok(hex::encode(digest_rows(canonical.iter())?))
 }
 
 #[cfg(feature = "enterprise-migration-spike")]
@@ -4545,7 +4545,7 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
                 values: row,
             })
             .collect();
-        let digest = hex::encode(digest_rows(canonical_rows.iter()));
+        let digest = hex::encode(digest_rows(canonical_rows.iter())?);
         let final_row = batch
             .rows()
             .last()
@@ -4648,8 +4648,8 @@ fn key_rows(rows: &[Vec<DbValue>]) -> anyhow::Result<Vec<KeyedRow<Vec<u8>, Vec<u
                 key: encode_row(&CanonicalRow {
                     values: &[],
                     ..canonical.clone()
-                }),
-                value: encode_row(&canonical),
+                })?,
+                value: encode_row(&canonical)?,
             })
         })
         .collect()
@@ -4732,7 +4732,7 @@ fn verify_manifest(state: &MigrationState, rows: &[Vec<DbValue>]) -> anyhow::Res
                 values: row,
             })
             .collect();
-        if hex::encode(digest_rows(canonical.iter())) != chunk.canonical_digest {
+        if hex::encode(digest_rows(canonical.iter())?) != chunk.canonical_digest {
             return Err(anyhow!("chunk {} canonical digest drift", chunk.chunk_id));
         }
         if rows[end - 1][..1] != chunk.final_key {

@@ -1013,6 +1013,7 @@ impl MigrationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::canonical::CANONICAL_ENCODING_VERSION;
     fn binding() -> ResumeBinding {
         ResumeBinding {
             migration_id: "m".into(),
@@ -1034,7 +1035,7 @@ mod tests {
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: None,
             conversion_policy: "exact".into(),
-            canonical_encoding_version: 1,
+            canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         }
     }
     fn chunk(id: u64) -> ChunkRecord {

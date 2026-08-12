@@ -1034,7 +1034,7 @@ fn live_target_writer_round_trips_binary_protocol_values() -> anyhow::Result<()>
          ) VALUES (
            NULL,false,32767,2147483647,9223372036854775807,4294967295,
            'Infinity'::real,'-Infinity'::double precision,'Unicode: åß水🧪','edge','z','Upper.Name',
-           decode('00ff','hex'),'{\"duplicate\":1,\"duplicate\":2,\"number\":1.00}'::json,
+           decode('00ff','hex'),'{\"nested\":{\"z\":0,\"a\":1},\"number\":1.00}'::json,
            '{\"number\":1.00,\"nested\":{\"z\":0,\"a\":1}}'::jsonb,
            999999999999999.00001,'2000-02-29','23:59:59.999999','23:59:59',
            '00:00:00.000001-07:30','1999-12-31 23:59:59.999999','1999-12-31 23:59:59',
@@ -1222,7 +1222,7 @@ fn canonical_value_matrix_digest(batch: &RowBatch) -> anyhow::Result<String> {
             values,
         })
         .collect::<Vec<_>>();
-    Ok(hex::encode(digest_rows(rows.iter())))
+    Ok(hex::encode(digest_rows(rows.iter())?))
 }
 
 #[test]

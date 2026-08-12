@@ -76,6 +76,17 @@ Implementation Phase 6's dialect is MySQL. Scope for its adapter proof:
   vectors, verification, and artifact I/O. Implementation Phase 1–5
   contracts are adapter-neutral by construction; MySQL must not fork them.
 
+Current spike evidence covers MySQL 8.0 and 8.4 over authenticated TLS for
+typed DDL, bounded two-page copy, canonical encoding version 2 value and digest
+round trips, durable recovery boundaries, cancellation rollback and resume,
+and causal COMMIT-response loss. The value matrix includes NULL, Unicode,
+signed and unsigned integer bounds, fixed-scale decimal values, observable
+float bits, `BIT`, temporal precision, binary/blob bytes, normalized JSON,
+catalog column order, and complete keys. MySQL normalizes negative floating
+zero when storing it and resolves duplicate JSON object members before readback;
+the shared canonical parser separately proves signed-zero framing and rejects
+duplicate decoded JSON keys. The broader drift gate below remains open.
+
 ## Planning ranges
 
 These rough estimates are pending spikes and staffing decisions:

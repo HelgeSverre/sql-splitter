@@ -47,8 +47,11 @@
 > target, and authenticated TLS. The current two-container matrix proves typed
 > table creation, bounded transactional copy, `AUTO_INCREMENT` restoration,
 > strict verification, durable completion, and completed-state resume. The
-> MySQL crash, cancellation, drift, and complete value matrices remain open, so
-> this is not the Phase 6 exit or a production support statement.
+> The MySQL 8.0/8.4 TLS matrix now also proves durable crash recovery, query
+> cancellation with rollback and resume, causal network COMMIT-response loss,
+> and the same-dialect canonical value contract. Broader source, target, plan,
+> and effect drift coverage remains open, so this is not the Phase 6 exit or a
+> production support statement.
 
 ## Status and product boundary
 

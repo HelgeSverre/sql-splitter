@@ -551,6 +551,20 @@ fn injected_mysql_interruption(interruption: Option<MySqlInterruptionPoint>) -> 
     anyhow!("injected MySQL execution interruption at {interruption:?}")
 }
 
+fn complete_mysql_pre_genesis_checks<T>(
+    validate_source_binding: impl FnOnce() -> anyhow::Result<()>,
+    capture_exact_source: impl FnOnce() -> anyhow::Result<()>,
+    attest_target: impl FnOnce() -> anyhow::Result<()>,
+    assert_target_empty: impl FnOnce() -> anyhow::Result<()>,
+    create_journal: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    validate_source_binding()?;
+    capture_exact_source()?;
+    attest_target()?;
+    assert_target_empty()?;
+    create_journal()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn execute_live_mysql_frozen_plan(
     plan_path: impl AsRef<Path>,
@@ -672,26 +686,43 @@ fn execute_live_mysql_frozen_plan_internal(
         Arc::clone(&target),
         cancellation.clone(),
     );
-    source
-        .validate_reviewed_binding(&reviewed)
-        .context("validate reviewed MySQL source factory binding before journal creation")?;
-    let (preflight_reader, _) = capture_exact_source(
-        &reviewed,
-        source.as_ref(),
-        &cancellation,
-        &source_metadata_config,
-        &freeze_config,
-    )
-    .context("re-attest the reviewed MySQL source before journal creation")?;
-    drop(preflight_reader);
-    attest_initial_mysql_target(&reviewed, target.endpoint_config(), &target_metadata_config)?;
-    target
-        .assert_empty()
-        .context("require the reviewed MySQL target to remain empty before execution")?;
     let binding = mysql_resume_binding(&reviewed, &accepted, approval_reference)?;
-    let mut journal = AppendJournal::create_new(
-        state_path,
-        mysql_journal_genesis(binding, reviewed.clone(), accepted),
+    let mut journal = complete_mysql_pre_genesis_checks(
+        || {
+            source
+                .validate_reviewed_binding(&reviewed)
+                .context("validate reviewed MySQL source factory binding before journal creation")
+        },
+        || {
+            let (preflight_reader, _) = capture_exact_source(
+                &reviewed,
+                source.as_ref(),
+                &cancellation,
+                &source_metadata_config,
+                &freeze_config,
+            )
+            .context("re-attest the reviewed MySQL source before journal creation")?;
+            drop(preflight_reader);
+            Ok(())
+        },
+        || {
+            attest_initial_mysql_target(
+                &reviewed,
+                target.endpoint_config(),
+                &target_metadata_config,
+            )
+        },
+        || {
+            target
+                .assert_empty()
+                .context("require the reviewed MySQL target to remain empty before execution")
+        },
+        || {
+            Ok(AppendJournal::create_new(
+                state_path,
+                mysql_journal_genesis(binding, reviewed.clone(), accepted),
+            )?)
+        },
     )?;
     execute_mysql_frozen_plan_internal(
         &reviewed,
@@ -2233,7 +2264,7 @@ fn batch_digest(
             values: row,
         })
         .collect::<Vec<_>>();
-    Ok(hex::encode(digest_rows(canonical.iter())))
+    Ok(hex::encode(digest_rows(canonical.iter())?))
 }
 
 #[cfg(test)]
@@ -2785,6 +2816,67 @@ mod tests {
             &target_metadata,
         )
         .is_err());
+    }
+
+    #[test]
+    fn journal_creation_follows_every_source_and_target_preflight_check() {
+        use std::sync::Arc;
+
+        const STEPS: [&str; 5] = [
+            "source_binding",
+            "source_capture",
+            "target_attestation",
+            "target_empty",
+            "journal",
+        ];
+        for failure in 0..STEPS.len() - 1 {
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let step = |index: usize| {
+                let observed = Arc::clone(&observed);
+                move || {
+                    observed.lock().unwrap().push(STEPS[index]);
+                    if index == failure {
+                        Err(anyhow!("injected pre-genesis failure"))
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+            let journal_observed = Arc::clone(&observed);
+            assert!(complete_mysql_pre_genesis_checks(
+                step(0),
+                step(1),
+                step(2),
+                step(3),
+                move || {
+                    journal_observed.lock().unwrap().push(STEPS[4]);
+                    Ok(())
+                },
+            )
+            .is_err());
+            assert_eq!(
+                *observed.lock().unwrap(),
+                STEPS[..=failure],
+                "failure at {} must not expose a journal",
+                STEPS[failure]
+            );
+        }
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let step = |index: usize| {
+            let observed = Arc::clone(&observed);
+            move || {
+                observed.lock().unwrap().push(STEPS[index]);
+                Ok(())
+            }
+        };
+        let journal_observed = Arc::clone(&observed);
+        complete_mysql_pre_genesis_checks(step(0), step(1), step(2), step(3), move || {
+            journal_observed.lock().unwrap().push(STEPS[4]);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(*observed.lock().unwrap(), STEPS);
     }
 
     fn auto_increment_reviewed_plan() -> (ReviewedPlan, MySqlAutoIncrementContract, String) {

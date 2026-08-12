@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::model::{QualifiedTable, VendorCatalog};
 use super::mysql_profile::{MySqlFreezeProfileContract, MySqlFreezeProfileError};
 use super::mysql_visibility::{
@@ -336,6 +337,11 @@ impl MigrationPlan {
         if self.schema_version != PLAN_SCHEMA_VERSION {
             return Err(PlanError::UnsupportedVersion {
                 found: self.schema_version,
+            });
+        }
+        if self.canonical_encoding_version != CANONICAL_ENCODING_VERSION {
+            return Err(PlanError::UnsupportedCanonicalEncodingVersion {
+                found: self.canonical_encoding_version,
             });
         }
         for (field, value) in [
@@ -807,6 +813,8 @@ pub enum PlanError {
     InvalidHash,
     #[error("unsupported plan schema version {found}")]
     UnsupportedVersion { found: u16 },
+    #[error("unsupported canonical encoding version {found}")]
+    UnsupportedCanonicalEncodingVersion { found: u16 },
     #[error("required plan field {field} is empty")]
     EmptyField { field: &'static str },
     #[error("plan contains duplicate operation IDs")]
@@ -909,7 +917,7 @@ mod tests {
             source_tls_binding: "source-tls".into(),
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
             consistency_mode: "consistent-snapshot".into(),
-            canonical_encoding_version: 1,
+            canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: "exact".into(),
             outage_policy: Some(ReviewedOutagePolicy {
                 schema_version: OUTAGE_PROJECTION_SCHEMA_VERSION,
@@ -1089,6 +1097,17 @@ mod tests {
         p.insert("x".into(), serde_json::json!(1));
         let b = PlanOperation::new(OperationKind::CopyTable, None, Vec::new(), p).unwrap();
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn stale_canonical_encoding_is_rejected_at_plan_validation() {
+        let mut plan = plan();
+        plan.canonical_encoding_version = CANONICAL_ENCODING_VERSION - 1;
+        assert!(matches!(
+            plan.validate(),
+            Err(PlanError::UnsupportedCanonicalEncodingVersion { found })
+                if found == CANONICAL_ENCODING_VERSION - 1
+        ));
     }
 
     #[test]

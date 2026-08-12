@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::artifact::{write_json_new, ArtifactError};
-use super::canonical::CANONICAL_ENCODING_VERSION;
+use super::canonical::{canonicalize_json, CANONICAL_ENCODING_VERSION};
 use super::connection::{
     CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult,
     ControlSession, KeysetPage, ReadOnlyEvidence, ReadSession, SnapshotToken,
@@ -49,7 +49,7 @@ use super::plan::{
     MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION,
 };
 
-pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 1;
+pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 2;
 pub const MYSQL_CONSISTENCY_SNAPSHOT: &str = "mysql-repeatable-read-consistent-snapshot";
 const DEFAULT_PORT: u16 = 3306;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 10;
@@ -3120,7 +3120,8 @@ impl WriteSession for MySqlWriter {
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(mysql_write_value)
+                    .zip(batch.columns())
+                    .map(|(value, column)| mysql_write_value(value, column))
                     .collect::<ConnectionResult<Vec<_>>>()
             })
             .collect::<ConnectionResult<Vec<_>>>()?;
@@ -3394,7 +3395,7 @@ fn mysql_parameter(value: &DbValue) -> ConnectionResult<Value> {
     }
 }
 
-fn mysql_write_value(value: &DbValue) -> ConnectionResult<Value> {
+fn mysql_write_value(value: &DbValue, column: &ColumnMeta) -> ConnectionResult<Value> {
     match value {
         DbValue::Null => Ok(Value::NULL),
         DbValue::Bool(value) => Ok(Value::Int(i64::from(*value))),
@@ -3410,7 +3411,25 @@ fn mysql_write_value(value: &DbValue) -> ConnectionResult<Value> {
         DbValue::Float32(bits) => Ok(Value::Float(f32::from_bits(*bits))),
         DbValue::Float64(bits) => Ok(Value::Double(f64::from_bits(*bits))),
         DbValue::Text(value) => Ok(Value::Bytes(value.as_bytes().to_vec())),
-        DbValue::Bytes(value) | DbValue::Json(value) => Ok(Value::Bytes(value.clone())),
+        DbValue::Bytes(value) if column.vendor_type == "bit" => {
+            if value.len() > std::mem::size_of::<u64>() {
+                return Err(ConnectionError::UnsupportedKeyValue);
+            }
+            let decoded = value
+                .iter()
+                .fold(0_u64, |decoded, byte| (decoded << 8) | u64::from(*byte));
+            let width = column.precision.ok_or_else(|| {
+                ConnectionError::InvalidRequest("MySQL BIT column has no reviewed width".into())
+            })?;
+            if width == 0 || width > 64 || (width < 64 && decoded >= 1_u64 << width) {
+                return Err(ConnectionError::UnsupportedKeyValue);
+            }
+            Ok(Value::UInt(decoded))
+        }
+        DbValue::Bytes(value) => Ok(Value::Bytes(value.clone())),
+        DbValue::Json(value) => canonicalize_json(value)
+            .map(Value::Bytes)
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string())),
         DbValue::Date { year, month, day } => Ok(Value::Date(
             u16::try_from(*year).map_err(|_| ConnectionError::UnsupportedKeyValue)?,
             *month,
@@ -3484,7 +3503,9 @@ fn mysql_value(value: Value, column: &ColumnMeta) -> ConnectionResult<DbValue> {
         Value::Float(value) => Ok(DbValue::Float32(value.to_bits())),
         Value::Double(value) => Ok(DbValue::Float64(value.to_bits())),
         Value::Bytes(value) => match column.vendor_type.as_str() {
-            "json" => Ok(DbValue::Json(value)),
+            "json" => canonicalize_json(&value)
+                .map(DbValue::Json)
+                .map_err(|error| ConnectionError::Database(error.to_string())),
             "bit" | "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob" => {
                 Ok(DbValue::Bytes(value))
             }
@@ -3908,6 +3929,12 @@ fn render_mysql_create_table(definition: &MySqlTableDefinition) -> Result<String
 
 fn column_meta(object: &CatalogObject) -> Result<ColumnMeta, MySqlPlanError> {
     let ordinal = required_u64(object, "ordinal")?;
+    let data_type = required_text(object, "data_type")?;
+    let scale = if matches!(data_type, "datetime" | "timestamp" | "time") {
+        optional_i64(object, "datetime_precision")
+    } else {
+        optional_i64(object, "numeric_scale")
+    };
     Ok(ColumnMeta {
         name: object.name.clone(),
         ordinal: u32::try_from(ordinal)
@@ -3919,11 +3946,11 @@ fn column_meta(object: &CatalogObject) -> Result<ColumnMeta, MySqlPlanError> {
             .map(u32::try_from)
             .transpose()
             .map_err(|_| MySqlPlanError::InvalidCatalog("column precision is too large".into()))?,
-        scale: optional_i64(object, "numeric_scale")
+        scale: scale
             .map(i32::try_from)
             .transpose()
             .map_err(|_| MySqlPlanError::InvalidCatalog("column scale is too large".into()))?,
-        timezone_semantics: match required_text(object, "data_type")? {
+        timezone_semantics: match data_type {
             "timestamp" => Some("mysql_session_time_zone".into()),
             "datetime" => Some("local_without_offset".into()),
             _ => None,
@@ -3952,7 +3979,7 @@ fn extract_catalog(
         .map_err(database_error)?;
     let column_rows: Vec<Row> = conn
         .exec(
-            "SELECT TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, COLUMN_DEFAULT, IS_NULLABLE, DATA_TYPE, COLUMN_TYPE, CHARACTER_SET_NAME, COLLATION_NAME, EXTRA, GENERATION_EXPRESSION, NUMERIC_PRECISION, NUMERIC_SCALE FROM information_schema.COLUMNS WHERE BINARY TABLE_SCHEMA = BINARY ? ORDER BY TABLE_NAME, ORDINAL_POSITION",
+            "SELECT TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, COLUMN_DEFAULT, IS_NULLABLE, DATA_TYPE, COLUMN_TYPE, CHARACTER_SET_NAME, COLLATION_NAME, EXTRA, GENERATION_EXPRESSION, NUMERIC_PRECISION, NUMERIC_SCALE, DATETIME_PRECISION FROM information_schema.COLUMNS WHERE BINARY TABLE_SCHEMA = BINARY ? ORDER BY TABLE_NAME, ORDINAL_POSITION",
             (database,),
         )
         .map_err(database_error)?;
@@ -3978,6 +4005,7 @@ fn extract_catalog(
         let generated_expression: String = take_cell(&mut row, 10, "GENERATION_EXPRESSION")?;
         let numeric_precision: Option<u64> = take_cell(&mut row, 11, "NUMERIC_PRECISION")?;
         let numeric_scale: Option<i64> = take_cell(&mut row, 12, "NUMERIC_SCALE")?;
+        let datetime_precision: Option<i64> = take_cell(&mut row, 13, "DATETIME_PRECISION")?;
         let id = catalog_id("column", database, &table_name, &column_name);
         let identifier = Identifier::new(column_name.clone())
             .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
@@ -4049,6 +4077,10 @@ fn extract_catalog(
             serde_json::json!(numeric_precision),
         );
         attributes.insert("numeric_scale".into(), serde_json::json!(numeric_scale));
+        attributes.insert(
+            "datetime_precision".into(),
+            serde_json::json!(datetime_precision),
+        );
         objects.push(CatalogObject {
             id,
             kind: CatalogObjectKind::Column,
@@ -6141,6 +6173,79 @@ mod tests {
         assert_eq!(render_mysql_decimal(b"0", 4).unwrap(), b"0.0000");
         assert!(render_mysql_decimal(b"1.2", 1).is_err());
         assert!(render_mysql_decimal(b"1", -1).is_err());
+    }
+
+    #[test]
+    fn mysql_json_values_use_the_shared_canonical_contract() {
+        let column = ColumnMeta {
+            name: identifier("payload"),
+            ordinal: 1,
+            vendor_type: "json".into(),
+            nullable: false,
+            collation: None,
+            precision: None,
+            scale: None,
+            timezone_semantics: None,
+        };
+        assert_eq!(
+            mysql_value(Value::Bytes(br#"{"b":1.00,"a":1e0}"#.to_vec()), &column).unwrap(),
+            DbValue::Json(br#"{"a":1,"b":1}"#.to_vec())
+        );
+        assert!(matches!(
+            mysql_value(Value::Bytes(br#"{"a":1,"a":2}"#.to_vec()), &column),
+            Err(ConnectionError::Database(_))
+        ));
+        assert!(matches!(
+            mysql_write_value(&DbValue::Json(br#"{"a":1,"a":2}"#.to_vec()), &column,),
+            Err(ConnectionError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn mysql_bit_values_bind_as_exact_unsigned_integers() {
+        let column = ColumnMeta {
+            name: identifier("flags"),
+            ordinal: 1,
+            vendor_type: "bit".into(),
+            nullable: false,
+            collation: None,
+            precision: Some(9),
+            scale: None,
+            timezone_semantics: None,
+        };
+        assert_eq!(
+            mysql_write_value(&DbValue::Bytes(vec![1, 255]), &column).unwrap(),
+            Value::UInt(511)
+        );
+        assert!(matches!(
+            mysql_write_value(&DbValue::Bytes(vec![2, 0]), &column),
+            Err(ConnectionError::UnsupportedKeyValue)
+        ));
+    }
+
+    #[test]
+    fn temporal_column_meta_uses_datetime_precision() {
+        let object = CatalogObject {
+            id: "column:app:items:created_at".into(),
+            kind: CatalogObjectKind::Column,
+            name: identifier("created_at"),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([
+                ("ordinal".into(), serde_json::json!(1)),
+                ("data_type".into(), serde_json::json!("timestamp")),
+                ("nullable".into(), serde_json::json!(false)),
+                ("collation".into(), serde_json::Value::Null),
+                ("numeric_precision".into(), serde_json::Value::Null),
+                ("numeric_scale".into(), serde_json::Value::Null),
+                ("datetime_precision".into(), serde_json::json!(6)),
+            ]),
+        };
+        let meta = column_meta(&object).unwrap();
+        assert_eq!(meta.scale, Some(6));
+        assert_eq!(
+            meta.timezone_semantics.as_deref(),
+            Some("mysql_session_time_zone")
+        );
     }
 
     #[test]

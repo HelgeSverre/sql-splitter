@@ -84,10 +84,12 @@ done
 docker exec "$container" mysql -uroot -prootpass -Nse 'SELECT 1' >/dev/null
 
 docker exec -i "$container" mysql -uroot -prootpass <<'SQL'
+SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE MIGRATION_SOURCE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_execution_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_values_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_source'@'%' IDENTIFIED BY 'sourcepass' REQUIRE X509;
 CREATE USER 'migration_target'@'%' IDENTIFIED BY 'targetpass' REQUIRE X509;
 CREATE USER 'migration_admin'@'%' IDENTIFIED BY 'adminpass' REQUIRE X509;
@@ -116,6 +118,8 @@ SET PERSIST partial_revokes = ON;
 GRANT SELECT ON *.* TO 'partially_restricted_reader'@'%';
 REVOKE SELECT ON migration_source.* FROM 'partially_restricted_reader'@'%';
 GRANT SELECT, SHOW VIEW ON migration_execution_source.* TO 'migration_execution_source'@'%';
+GRANT SELECT, SHOW VIEW ON migration_values_source.* TO 'migration_execution_source'@'%';
+GRANT SELECT ON migration_values_source.* TO 'migration_admin'@'%';
 FLUSH PRIVILEGES;
 USE migration_source;
 CREATE TABLE items (
@@ -148,6 +152,51 @@ CREATE TABLE copy_items (
 ) ENGINE=InnoDB;
 INSERT INTO copy_items(id, payload) VALUES (1, 'one'), (2, 'two'), (3, 'three');
 ALTER TABLE copy_items AUTO_INCREMENT = 10;
+USE migration_values_source;
+CREATE TABLE value_matrix (
+  id BIGINT NOT NULL PRIMARY KEY,
+  nullable_value TEXT NULL,
+  unicode_value VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL,
+  tiny_value TINYINT NOT NULL,
+  small_value SMALLINT NOT NULL,
+  medium_value MEDIUMINT NOT NULL,
+  int_value INT NOT NULL,
+  big_value BIGINT NOT NULL,
+  unsigned_big_value BIGINT UNSIGNED NOT NULL,
+  decimal_value DECIMAL(30,10) NOT NULL,
+  float_value FLOAT NOT NULL,
+  double_value DOUBLE NOT NULL,
+  bit_value BIT(9) NOT NULL,
+  date_value DATE NOT NULL,
+  datetime6_value DATETIME(6) NOT NULL,
+  datetime0_value DATETIME NOT NULL,
+  timestamp6_value TIMESTAMP(6) NOT NULL,
+  timestamp0_value TIMESTAMP NOT NULL,
+  time6_value TIME(6) NOT NULL,
+  year_value YEAR NOT NULL,
+  binary_value VARBINARY(8) NOT NULL,
+  blob_value BLOB NOT NULL,
+  json_value JSON NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO value_matrix VALUES
+  (1, NULL, 'Unicode: åß水🧪', -128, -32768, -8388608, -2147483648,
+   -9223372036854775808, 0, -99999999999999999999.9999999999, -0.0, -0.0,
+   b'000000001', '1000-01-01', '2000-02-29 10:11:12.123456',
+   '2000-02-29 10:11:12', '2000-02-29 10:11:12.123456',
+   '2000-02-29 10:11:12', '-838:59:59.000000', 1901,
+   X'00FF10', X'00FF00AA', '{"z":1.00,"a":1e0}'),
+  (2, '', 'combining: é', 127, 32767, 8388607, 2147483647,
+   9223372036854775807, 18446744073709551615, 99999999999999999999.9999999999,
+   3.25, -1.7976931348623157e308, b'111111111', '9999-12-31',
+   '2038-01-19 03:14:07.999999', '2038-01-19 03:14:07',
+   '2038-01-19 03:14:07.999999', '2038-01-19 03:14:07',
+   '838:59:59.000000', 2155, X'FF00', X'FF0010',
+   '{"array":[1,1.0,1e0,null,true,false],"nested":{"z":0,"a":1}}'),
+  (3, 'present', '', 0, 0, 0, 0, 0, 42, 0.0100000000, 0.0, 0.0,
+   b'000000000', '1970-01-01', '1970-01-01 00:00:00.000001',
+   '1970-01-01 00:00:00', '1970-01-01 00:00:01.000001',
+   '1970-01-01 00:00:01', '00:00:00.000001', 2000,
+   X'', X'', '{"duplicate":1,"duplicate":2,"number":1.00}');
 SQL
 
 write_config() {
@@ -238,10 +287,12 @@ done
 docker exec "$target_container" mysql -uroot -prootpass -Nse 'SELECT 1' >/dev/null
 docker exec -i "$target_container" mysql -uroot -prootpass <<'SQL'
 CREATE DATABASE migration_execution_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_values_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_execution_target'@'%' IDENTIFIED BY 'exectargetpass' REQUIRE X509;
 CREATE USER 'execution_target_metadata_admin'@'%' IDENTIFIED BY 'exectargetmetapass' REQUIRE X509;
 CREATE ROLE 'execution_target_metadata_role'@'%';
 GRANT ALL PRIVILEGES ON migration_execution_target.* TO 'migration_execution_target'@'%';
+GRANT ALL PRIVILEGES ON migration_values_target.* TO 'migration_execution_target'@'%';
 GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON *.* TO 'execution_target_metadata_admin'@'%';
 GRANT SHOW_ROUTINE ON *.* TO 'execution_target_metadata_role'@'%';
 GRANT 'execution_target_metadata_role'@'%' TO 'execution_target_metadata_admin'@'%';
@@ -252,11 +303,21 @@ execution_source_metadata_config="$test_dir/execution-source-metadata.toml"
 execution_freeze_config="$test_dir/execution-freeze.toml"
 execution_target_config="$test_dir/execution-target.toml"
 execution_target_metadata_config="$test_dir/execution-target-metadata.toml"
+values_source_config="$test_dir/values-source.toml"
+values_source_metadata_config="$test_dir/values-source-metadata.toml"
+values_freeze_config="$test_dir/values-freeze.toml"
+values_target_config="$test_dir/values-target.toml"
+values_target_metadata_config="$test_dir/values-target-metadata.toml"
 write_config "$execution_source_config" "$port" migration_execution_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
 write_config "$execution_source_metadata_config" "$port" migration_execution_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
 write_config "$execution_freeze_config" "$port" migration_execution_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
 write_config "$execution_target_config" "$target_port" migration_execution_target migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
 write_config "$execution_target_metadata_config" "$target_port" migration_execution_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
+write_config "$values_source_config" "$port" migration_values_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
+write_config "$values_source_metadata_config" "$port" migration_values_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
+write_config "$values_freeze_config" "$port" migration_values_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
+write_config "$values_target_config" "$target_port" migration_values_target migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
+write_config "$values_target_metadata_config" "$target_port" migration_values_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
 export SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD=execsourcepass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD=exectargetpass
 export SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD=exectargetmetapass
@@ -268,6 +329,14 @@ export SQL_SPLITTER_MYSQL_TEST_EXECUTION_TARGET_METADATA_CONFIG="$execution_targ
 export SQL_SPLITTER_MYSQL_TEST_EXECUTION_PLAN_OUTPUT="$test_dir/execution-plan.json"
 export SQL_SPLITTER_MYSQL_TEST_FREEZE_ASSERTION_OUTPUT="$test_dir/freeze-assertion.json"
 export SQL_SPLITTER_MYSQL_TEST_EXECUTION_JOURNAL_OUTPUT="$journal_dir/execution-state.journal"
+export SQL_SPLITTER_MYSQL_TEST_VALUES_SOURCE_CONFIG="$values_source_config"
+export SQL_SPLITTER_MYSQL_TEST_VALUES_SOURCE_METADATA_CONFIG="$values_source_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_VALUES_FREEZE_CONFIG="$values_freeze_config"
+export SQL_SPLITTER_MYSQL_TEST_VALUES_TARGET_CONFIG="$values_target_config"
+export SQL_SPLITTER_MYSQL_TEST_VALUES_TARGET_METADATA_CONFIG="$values_target_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_VALUES_PLAN_OUTPUT="$test_dir/values-plan.json"
+export SQL_SPLITTER_MYSQL_TEST_VALUES_ASSERTION_OUTPUT="$test_dir/values-assertion.json"
+export SQL_SPLITTER_MYSQL_TEST_VALUES_JOURNAL_OUTPUT="$journal_dir/values-state.journal"
 
 docker exec "$container" mysql -uroot -prootpass -Nse \
   "SET PERSIST super_read_only = ON"
@@ -302,6 +371,10 @@ cargo test --no-default-features --features enterprise-migration-spike,migration
 
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_two_container_execute_and_resume \
+  -- --ignored --exact --nocapture
+
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_mysql_plan_test live_mysql_canonical_value_matrix \
   -- --ignored --exact --nocapture
 
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \

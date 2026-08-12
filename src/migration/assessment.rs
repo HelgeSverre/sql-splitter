@@ -665,6 +665,7 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    use crate::migration::canonical::CANONICAL_ENCODING_VERSION;
     use crate::migration::model::{CatalogNamespace, CatalogObject, Identifier, VendorCatalog};
     use crate::migration::plan::{
         AssessmentStatus, MigrationPlan, PlanPurpose, ReviewedPlan, UnsupportedObjectReport,
@@ -1030,7 +1031,7 @@ mod tests {
             source_tls_binding: "hostname_verified".into(),
             target_tls_binding: AssessmentStatus::NotAssessed,
             consistency_mode: "not_assessed".into(),
-            canonical_encoding_version: 1,
+            canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: "postgresql_same_dialect_exact".into(),
             outage_policy: None,
             postgres_source_profile: None,

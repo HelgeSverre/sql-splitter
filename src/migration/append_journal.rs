@@ -1846,6 +1846,7 @@ fn lock_exclusive(_file: &File) -> Result<(), AppendJournalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::canonical::CANONICAL_ENCODING_VERSION;
     use crate::migration::journal::ConsistencyEvidence;
     use crate::migration::model::{CatalogNamespace, CatalogObject, Identifier, VendorCatalog};
     use crate::migration::outage_projection::{
@@ -1935,7 +1936,7 @@ mod tests {
             source_tls_binding: "source-tls".into(),
             target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
             consistency_mode: POSTGRES_CONSISTENCY_SNAPSHOT.into(),
-            canonical_encoding_version: 1,
+            canonical_encoding_version: CANONICAL_ENCODING_VERSION,
             conversion_policy: "exact".into(),
             outage_policy: Some(outage_policy.clone()),
             postgres_source_profile: None,
@@ -1973,7 +1974,7 @@ mod tests {
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: None,
             conversion_policy: "exact".into(),
-            canonical_encoding_version: 1,
+            canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
         let accepted_outage_projection = AcceptedOutageProjection {
             schema_version: OUTAGE_PROJECTION_SCHEMA_VERSION,
