@@ -827,6 +827,9 @@ impl JournalProjection {
 fn operation_phase(kind: &OperationKind) -> OperationPhase {
     match kind {
         OperationKind::VerifyTable | OperationKind::VerifySchema => OperationPhase::Verification,
+        OperationKind::Vendor(name) if name == "restore_mysql_authorization" => {
+            OperationPhase::Verification
+        }
         OperationKind::Vendor(name) if name == "verify_postgres_partition_topology" => {
             OperationPhase::Verification
         }
@@ -1945,6 +1948,7 @@ mod tests {
             mysql_target_snapshot_evidence: None,
             mysql_metadata_visibility: None,
             mysql_target_metadata_visibility: None,
+            mysql_authorization: None,
             capabilities: BTreeMap::new(),
             operations,
             unsupported_objects: UnsupportedObjectReport::default(),

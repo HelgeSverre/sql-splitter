@@ -4433,6 +4433,7 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         mysql_target_snapshot_evidence: None,
         mysql_metadata_visibility: None,
         mysql_target_metadata_visibility: None,
+        mysql_authorization: None,
         capabilities: BTreeMap::from([
             ("consistent_snapshot".into(), "fixture_supported".into()),
             ("server_read_only".into(), "fixture_supported".into()),
@@ -5230,6 +5231,7 @@ mod tests {
             mysql_target_snapshot_evidence: None,
             mysql_metadata_visibility: None,
             mysql_target_metadata_visibility: None,
+            mysql_authorization: None,
             capabilities: BTreeMap::from([("source_tls".into(), binding)]),
             operations: Vec::new(),
             unsupported_objects: UnsupportedObjectReport::default(),

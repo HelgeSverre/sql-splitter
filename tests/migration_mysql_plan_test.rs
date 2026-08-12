@@ -41,6 +41,7 @@ use sql_splitter::migration::mysql::{
     collect_mysql_metadata_visibility, inspect_live_endpoint, mysql_auto_increment_states,
     mysql_catalog_fingerprint, mysql_foreign_keys, mysql_table_definitions, mysql_tls_binding,
     validate_mysql_external_freeze_continuity, write_live_plan, write_live_plan_with_visibility,
+    write_live_plan_with_visibility_and_authorization, MySqlAuthorizationTargetState,
     MySqlEndpointConfig, MySqlSourceFactory, MySqlTableState, MySqlTargetFactory,
     MYSQL_CONSISTENCY_SNAPSHOT,
 };
@@ -1433,6 +1434,276 @@ fn mysql_value_rows_digest(
 #[cfg(feature = "migration-fault-injection")]
 #[test]
 #[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
+fn live_mysql_authorization_restoration_recovery_matrix() -> anyhow::Result<()> {
+    let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_AUTHORIZATION_SOURCE_CONFIG")?;
+    let source_metadata_path =
+        required_path("SQL_SPLITTER_MYSQL_TEST_AUTHORIZATION_SOURCE_METADATA_CONFIG")?;
+    let freeze_path = required_path("SQL_SPLITTER_MYSQL_TEST_AUTHORIZATION_FREEZE_CONFIG")?;
+    let artifact_dir = required_path("SQL_SPLITTER_MYSQL_TEST_AUTHORIZATION_ARTIFACT_DIR")?;
+    let journal_dir = required_path("SQL_SPLITTER_MYSQL_TEST_AUTHORIZATION_JOURNAL_DIR")?;
+    let cases = [
+        (
+            "prepared",
+            MySqlExecutionInterruption::AuthorizationPrepared,
+            OperationState::Prepared,
+            MySqlAuthorizationTargetState::Absent,
+        ),
+        (
+            "partial",
+            MySqlExecutionInterruption::AuthorizationPartial(1),
+            OperationState::Prepared,
+            MySqlAuthorizationTargetState::Subset,
+        ),
+        (
+            "applied",
+            MySqlExecutionInterruption::AuthorizationApplied,
+            OperationState::Prepared,
+            MySqlAuthorizationTargetState::Exact,
+        ),
+        (
+            "committed",
+            MySqlExecutionInterruption::AuthorizationCommitted,
+            OperationState::Committed,
+            MySqlAuthorizationTargetState::Exact,
+        ),
+    ];
+
+    for (name, interruption, expected_operation_state, expected_target_state) in cases {
+        let target_path = artifact_dir.join(format!("authorization-{name}-target.toml"));
+        let target_metadata_path =
+            artifact_dir.join(format!("authorization-{name}-target-metadata.toml"));
+        let mapping_path = artifact_dir.join(format!("authorization-{name}-mapping.json"));
+        let plan_path = artifact_dir.join(format!("authorization-{name}-plan.json"));
+        let assertion_path = artifact_dir.join(format!("authorization-{name}-assertion.json"));
+        let journal_path = journal_dir.join(format!("authorization-{name}.journal"));
+        let target_config = MySqlEndpointConfig::read(&target_path)?;
+        let target_metadata_config = MySqlEndpointConfig::read(&target_metadata_path)?;
+        let mut metadata = connect(&target_metadata_config)?;
+        let credential_rows_before: Vec<(String, String, String, String, String)> = metadata.exec(
+            "SELECT User, Host, plugin, authentication_string, account_locked FROM mysql.user WHERE User IN (?, ?, ?, ?) ORDER BY User, Host",
+            (
+                format!("mapped_global_{name}"),
+                format!("mapped_proxy_{name}"),
+                format!("mapped_reader_{name}"),
+                format!("mapped_role_{name}"),
+            ),
+        )?;
+        assert_eq!(credential_rows_before.len(), 4);
+
+        let reviewed = write_live_plan_with_visibility_and_authorization(
+            &source_path,
+            &source_metadata_path,
+            &freeze_path,
+            &target_path,
+            &target_metadata_path,
+            &mapping_path,
+            &plan_path,
+        )?;
+        reviewed.plan.validate_for_execution()?;
+        assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+        assert!(!reviewed
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .any(|object| object.object_kind == "privilege"));
+        let contract = reviewed
+            .plan
+            .mysql_authorization
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("reviewed plan has no authorization contract"))?;
+        let required_record_classes: [fn(&MySqlGrantRecord) -> bool; 9] = [
+            |record: &MySqlGrantRecord| matches!(record, MySqlGrantRecord::StaticGlobal { .. }),
+            |record: &MySqlGrantRecord| matches!(record, MySqlGrantRecord::DynamicGlobal { .. }),
+            |record: &MySqlGrantRecord| matches!(record, MySqlGrantRecord::Database { .. }),
+            |record: &MySqlGrantRecord| matches!(record, MySqlGrantRecord::Table { .. }),
+            |record: &MySqlGrantRecord| matches!(record, MySqlGrantRecord::Column { .. }),
+            |record: &MySqlGrantRecord| matches!(record, MySqlGrantRecord::Proxy { .. }),
+            |record: &MySqlGrantRecord| matches!(record, MySqlGrantRecord::RoleEdge { .. }),
+            |record: &MySqlGrantRecord| matches!(record, MySqlGrantRecord::DefaultRole { .. }),
+            |record: &MySqlGrantRecord| matches!(record, MySqlGrantRecord::PartialRevoke { .. }),
+        ];
+        for required in required_record_classes {
+            assert!(contract.translated_inventory.records.iter().any(required));
+        }
+        let authorization_operation = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| {
+                matches!(
+                    &operation.kind,
+                    OperationKind::Vendor(kind) if kind == "restore_mysql_authorization"
+                )
+            })
+            .ok_or_else(|| anyhow::anyhow!("reviewed plan has no authorization operation"))?;
+        assert_eq!(authorization_operation.dependencies.len(), 1);
+        assert!(reviewed.plan.operations.iter().any(|operation| {
+            operation.id == authorization_operation.dependencies[0]
+                && operation.kind == OperationKind::VerifySchema
+        }));
+        let serialized_plan = std::fs::read_to_string(&plan_path)?;
+        for forbidden in [
+            "sourceauthpass",
+            "mappedpass",
+            "caching_sha2_password",
+            "mysql_native_password",
+        ] {
+            assert!(
+                !serialized_plan.contains(forbidden),
+                "reviewed plan contains forbidden credential or plugin value {forbidden:?}"
+            );
+        }
+        write_live_freeze_assertion(&assertion_path, &format!("mysql-authorization-{name}"))?;
+
+        let error = execute_live_mysql_frozen_plan_interrupted(MySqlInterruptedExecution {
+            plan_path: &plan_path,
+            source_config_path: &source_path,
+            source_metadata_config_path: &source_metadata_path,
+            freeze_config_path: &freeze_path,
+            target_config_path: &target_path,
+            target_metadata_config_path: &target_metadata_path,
+            freeze_assertion_path: &assertion_path,
+            approval_reference: "live-authorization-restoration",
+            state_path: &journal_path,
+            interruption,
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("injected MySQL execution interruption"));
+
+        let interrupted = AppendJournal::open_resume(&journal_path)?;
+        assert_eq!(
+            interrupted
+                .projection()
+                .operations
+                .get(authorization_operation.id.as_str()),
+            Some(&expected_operation_state),
+            "case {name}"
+        );
+        let authorization_target = MySqlTargetFactory::new(
+            target_metadata_config.clone(),
+            reviewed
+                .plan
+                .source_catalog
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("reviewed plan has no source catalog"))?,
+            reviewed
+                .plan
+                .mysql_target_snapshot_evidence
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("reviewed plan has no target evidence"))?,
+        )?;
+        assert_eq!(
+            authorization_target.inspect_authorization(
+                contract,
+                reviewed
+                    .plan
+                    .mysql_target_metadata_visibility
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("reviewed plan has no target visibility"))?,
+            )?,
+            expected_target_state,
+            "case {name}"
+        );
+        drop(interrupted);
+
+        let resumed = resume_live_mysql_frozen_plan(
+            &journal_path,
+            &source_path,
+            &source_metadata_path,
+            &freeze_path,
+            &target_path,
+            &target_metadata_path,
+            &assertion_path,
+        )?;
+        assert_eq!(resumed.copied_rows, 2, "case {name}");
+        assert_eq!(resumed.committed_chunks, 1, "case {name}");
+        let completed = AppendJournal::open_resume(&journal_path)?;
+        assert_eq!(completed.projection().status, MigrationStatus::Completed);
+        assert_eq!(
+            completed
+                .projection()
+                .operations
+                .get(authorization_operation.id.as_str()),
+            Some(&OperationState::Verified)
+        );
+        assert_eq!(
+            authorization_target.inspect_authorization(
+                contract,
+                reviewed
+                    .plan
+                    .mysql_target_metadata_visibility
+                    .as_ref()
+                    .unwrap(),
+            )?,
+            MySqlAuthorizationTargetState::Exact
+        );
+
+        let credential_rows_after: Vec<(String, String, String, String, String)> = metadata.exec(
+            "SELECT User, Host, plugin, authentication_string, account_locked FROM mysql.user WHERE User IN (?, ?, ?, ?) ORDER BY User, Host",
+            (
+                format!("mapped_global_{name}"),
+                format!("mapped_proxy_{name}"),
+                format!("mapped_reader_{name}"),
+                format!("mapped_role_{name}"),
+            ),
+        )?;
+        assert_eq!(credential_rows_after, credential_rows_before);
+
+        let mut reader_config = target_config.clone();
+        reader_config.user = format!("mapped_reader_{name}");
+        reader_config.credential_env = "SQL_SPLITTER_MYSQL_AUTH_MAPPED_PASSWORD".into();
+        let mut reader = connect(&reader_config)?;
+        let rows: Vec<(i64, String)> = reader.query(format!(
+            "SELECT id, payload FROM {}.authorization_items ORDER BY id",
+            target_config.database
+        ))?;
+        assert_eq!(
+            rows,
+            vec![
+                (1, "authorization-one".into()),
+                (2, "authorization-two".into())
+            ]
+        );
+        let current_role: String = reader
+            .query_first("SELECT CURRENT_ROLE()")?
+            .ok_or_else(|| anyhow::anyhow!("mapped reader has no current role result"))?;
+        assert!(current_role.contains(&format!("mapped_role_{name}")));
+        reader.query_drop("START TRANSACTION")?;
+        reader.query_drop(format!(
+            "UPDATE {}.authorization_items SET payload = payload WHERE id = 1",
+            target_config.database
+        ))?;
+        reader.query_drop(format!(
+            "DELETE FROM {}.authorization_items WHERE id = 2",
+            target_config.database
+        ))?;
+        reader.query_drop("ROLLBACK")?;
+
+        let mut global_config = target_config.clone();
+        global_config.user = format!("mapped_global_{name}");
+        global_config.credential_env = "SQL_SPLITTER_MYSQL_AUTH_MAPPED_PASSWORD".into();
+        global_config.database = "migration_execution_target".into();
+        let mut global = connect(&global_config)?;
+        let visible_elsewhere: u64 = global
+            .query_first("SELECT COUNT(*) FROM migration_values_target.value_matrix")?
+            .unwrap_or(0);
+        assert_eq!(visible_elsewhere, 3);
+        assert!(global
+            .query_drop(format!(
+                "SELECT COUNT(*) FROM {}.authorization_items",
+                target_config.database
+            ))
+            .is_err());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "migration-fault-injection")]
+#[test]
+#[ignore = "requires two disposable MySQL 8.0/8.4 TLS containers"]
 fn live_mysql_recovery_boundary_matrix() -> anyhow::Result<()> {
     let source_path = required_path("SQL_SPLITTER_MYSQL_TEST_EXECUTION_SOURCE_CONFIG")?;
     let source_metadata_path =
@@ -1604,6 +1875,10 @@ fn live_mysql_recovery_boundary_matrix() -> anyhow::Result<()> {
             MySqlExecutionInterruption::BeforeForeignKeyChecks
             | MySqlExecutionInterruption::ForeignKeyPrepared
             | MySqlExecutionInterruption::ForeignKeyCommitted
+            | MySqlExecutionInterruption::AuthorizationPrepared
+            | MySqlExecutionInterruption::AuthorizationPartial(_)
+            | MySqlExecutionInterruption::AuthorizationApplied
+            | MySqlExecutionInterruption::AuthorizationCommitted
             | MySqlExecutionInterruption::CoerceFirstWriteValue
             | MySqlExecutionInterruption::TruncateFirstWriteText
             | MySqlExecutionInterruption::ReplaceFirstWriteText

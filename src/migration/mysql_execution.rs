@@ -3,6 +3,7 @@
 //! MySQL DDL implicitly commits. Each create-only statement therefore owns one
 //! journal intent and is inspected independently after any error or restart.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,12 +28,14 @@ use super::model::{DbValue, Identifier, KeyTuple, QualifiedTable, RowBatch, Vend
 use super::mysql::{
     attest_mysql_external_freeze, collect_mysql_metadata_visibility, mysql_auto_increment_states,
     mysql_catalog_fingerprint, mysql_foreign_keys, mysql_table_definitions,
-    validate_mysql_external_freeze_continuity, MySqlAutoIncrementState,
-    MySqlAutoIncrementTargetState, MySqlCatalogSnapshot, MySqlEndpointConfig, MySqlForeignKey,
-    MySqlForeignKeyState, MySqlResumableKey, MySqlSourceFactory, MySqlTableDefinition,
-    MySqlTableMapping, MySqlTableState, MySqlTargetFactory,
+    validate_mysql_external_freeze_continuity, MySqlAuthorizationTargetState,
+    MySqlAutoIncrementState, MySqlAutoIncrementTargetState, MySqlCatalogSnapshot,
+    MySqlEndpointConfig, MySqlForeignKey, MySqlForeignKeyState, MySqlResumableKey,
+    MySqlSourceFactory, MySqlTableDefinition, MySqlTableMapping, MySqlTableState,
+    MySqlTargetFactory,
 };
 use super::mysql_profile::{MySqlExternalFreezeAssertion, MySqlExternalFreezeAttestation};
+use super::mysql_visibility::MySqlAuthorizationContract;
 use super::plan::{
     MySqlSnapshotEvidence, OperationKind, PlanOperation, ReviewedPlan,
     MYSQL_SAME_DIALECT_CONVERSION_POLICY,
@@ -437,11 +440,19 @@ struct MySqlForeignKeyContract {
     foreign_key: MySqlForeignKey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MySqlAuthorizationAttestationStage {
+    Initial,
+    Reconciling,
+    Exact,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MySqlExecutionAdminConfigs<'a> {
     pub freeze: &'a MySqlEndpointConfig,
     pub source_metadata: &'a MySqlEndpointConfig,
     pub target_metadata: &'a MySqlEndpointConfig,
+    pub authorization_target: &'a MySqlTargetFactory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,6 +475,10 @@ enum MySqlInterruptionPoint {
     BeforeForeignKeyChecks,
     ForeignKeyPrepared,
     ForeignKeyCommitted,
+    AuthorizationPrepared,
+    AuthorizationPartial(usize),
+    AuthorizationApplied,
+    AuthorizationCommitted,
     CoerceFirstWriteValue,
     TruncateFirstWriteText,
     ReplaceFirstWriteText,
@@ -486,6 +501,10 @@ pub enum MySqlExecutionInterruption {
     BeforeForeignKeyChecks,
     ForeignKeyPrepared,
     ForeignKeyCommitted,
+    AuthorizationPrepared,
+    AuthorizationPartial(usize),
+    AuthorizationApplied,
+    AuthorizationCommitted,
     CoerceFirstWriteValue,
     TruncateFirstWriteText,
     ReplaceFirstWriteText,
@@ -508,6 +527,12 @@ impl From<MySqlExecutionInterruption> for MySqlInterruptionPoint {
             MySqlExecutionInterruption::BeforeForeignKeyChecks => Self::BeforeForeignKeyChecks,
             MySqlExecutionInterruption::ForeignKeyPrepared => Self::ForeignKeyPrepared,
             MySqlExecutionInterruption::ForeignKeyCommitted => Self::ForeignKeyCommitted,
+            MySqlExecutionInterruption::AuthorizationPrepared => Self::AuthorizationPrepared,
+            MySqlExecutionInterruption::AuthorizationPartial(limit) => {
+                Self::AuthorizationPartial(limit)
+            }
+            MySqlExecutionInterruption::AuthorizationApplied => Self::AuthorizationApplied,
+            MySqlExecutionInterruption::AuthorizationCommitted => Self::AuthorizationCommitted,
             MySqlExecutionInterruption::CoerceFirstWriteValue => Self::CoerceFirstWriteValue,
             MySqlExecutionInterruption::TruncateFirstWriteText => Self::TruncateFirstWriteText,
             MySqlExecutionInterruption::ReplaceFirstWriteText => Self::ReplaceFirstWriteText,
@@ -556,6 +581,7 @@ impl MySqlCancellationMonitor {
     fn start(
         source: Arc<MySqlSourceFactory>,
         target: Arc<MySqlTargetFactory>,
+        authorization_target: Arc<MySqlTargetFactory>,
         cancellation: CancellationToken,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
@@ -571,6 +597,7 @@ impl MySqlCancellationMonitor {
             for (label, control) in [
                 ("source", source.open_control()),
                 ("target", target.open_control()),
+                ("target authorization", authorization_target.open_control()),
             ] {
                 match control {
                     Ok(mut control) => {
@@ -732,6 +759,12 @@ fn execute_live_mysql_frozen_plan_internal(
         .ok_or_else(|| anyhow!("reviewed MySQL plan has no target snapshot evidence"))?;
     let target = Arc::new(MySqlTargetFactory::new_with_cancellation(
         target_config,
+        source_catalog.clone(),
+        target_evidence.clone(),
+        cancellation.clone(),
+    )?);
+    let authorization_target = Arc::new(MySqlTargetFactory::new_with_cancellation(
+        target_metadata_config.clone(),
         source_catalog,
         target_evidence,
         cancellation.clone(),
@@ -755,6 +788,7 @@ fn execute_live_mysql_frozen_plan_internal(
     let _monitor = MySqlCancellationMonitor::start(
         Arc::clone(&source),
         Arc::clone(&target),
+        Arc::clone(&authorization_target),
         cancellation.clone(),
     );
     let binding = mysql_resume_binding(&reviewed, &accepted, approval_reference)?;
@@ -805,6 +839,7 @@ fn execute_live_mysql_frozen_plan_internal(
             freeze: &freeze_config,
             source_metadata: &source_metadata_config,
             target_metadata: &target_metadata_config,
+            authorization_target: authorization_target.as_ref(),
         },
         &assertion,
         interruption,
@@ -901,6 +936,12 @@ fn resume_live_mysql_frozen_plan_internal(
         .ok_or_else(|| anyhow!("reviewed MySQL plan has no target snapshot evidence"))?;
     let target = Arc::new(MySqlTargetFactory::new_with_cancellation(
         target_config,
+        source_catalog.clone(),
+        target_evidence.clone(),
+        cancellation.clone(),
+    )?);
+    let authorization_target = Arc::new(MySqlTargetFactory::new_with_cancellation(
+        target_metadata_config.clone(),
         source_catalog,
         target_evidence,
         cancellation.clone(),
@@ -924,6 +965,7 @@ fn resume_live_mysql_frozen_plan_internal(
     let _monitor = MySqlCancellationMonitor::start(
         Arc::clone(&source),
         Arc::clone(&target),
+        Arc::clone(&authorization_target),
         cancellation.clone(),
     );
     execute_mysql_frozen_plan(
@@ -936,6 +978,7 @@ fn resume_live_mysql_frozen_plan_internal(
             freeze: &freeze_config,
             source_metadata: &source_metadata_config,
             target_metadata: &target_metadata_config,
+            authorization_target: authorization_target.as_ref(),
         },
         &assertion,
     )?;
@@ -1046,6 +1089,9 @@ fn mysql_journal_genesis(
             phase: if matches!(
                 operation.kind,
                 OperationKind::VerifyTable | OperationKind::VerifySchema
+            ) || matches!(
+                &operation.kind,
+                OperationKind::Vendor(name) if name == "restore_mysql_authorization"
             ) {
                 OperationPhase::Verification
             } else {
@@ -1177,113 +1223,160 @@ where
         .cloned()
         .ok_or_else(|| anyhow!("MySQL journal genesis has no accepted freeze attestation"))?;
     validate_accepted_freeze(reviewed, &accepted)?;
-    let mut require_freeze = || -> anyhow::Result<()> {
-        cancellation.check()?;
-        let current = attest().context("re-attest the external MySQL freeze")?;
-        validate_mysql_external_freeze_continuity(&accepted, &current)
-            .context("validate continuous MySQL freeze evidence")?;
-        attest_current_mysql_source_visibility(
+    {
+        let authorization_stage =
+            Cell::new(mysql_authorization_attestation_stage(reviewed, journal)?);
+        let mut require_freeze = || -> anyhow::Result<()> {
+            cancellation.check()?;
+            let current = attest().context("re-attest the external MySQL freeze")?;
+            validate_mysql_external_freeze_continuity(&accepted, &current)
+                .context("validate continuous MySQL freeze evidence")?;
+            attest_current_mysql_source_visibility(
+                reviewed,
+                source.endpoint_config(),
+                admin_configs.source_metadata,
+                admin_configs.freeze,
+            )
+            .context("re-attest MySQL source metadata visibility and authorization inventory")?;
+            attest_current_mysql_target_visibility(
+                reviewed,
+                target.endpoint_config(),
+                admin_configs.target_metadata,
+                admin_configs.authorization_target,
+                authorization_stage.get(),
+            )
+            .context("re-attest MySQL target metadata visibility and authorization inventory")?;
+            cancellation.check()?;
+            Ok(())
+        };
+
+        match journal.projection().status {
+            MigrationStatus::ManualReconciliationRequired | MigrationStatus::Cancelled => {
+                return Err(anyhow!(
+                    "MySQL migration journal is in a terminal non-success state"
+                ));
+            }
+            MigrationStatus::Running | MigrationStatus::Verifying | MigrationStatus::Completed => {}
+        }
+
+        require_freeze()?;
+        let (mut reader, initial_catalog) = capture_exact_source(
             reviewed,
-            source.endpoint_config(),
+            source,
+            cancellation,
             admin_configs.source_metadata,
             admin_configs.freeze,
-        )
-        .context("re-attest MySQL source metadata visibility and authorization inventory")?;
-        attest_current_mysql_target_visibility(
-            reviewed,
-            target.endpoint_config(),
-            admin_configs.target_metadata,
-        )
-        .context("re-attest MySQL target metadata visibility and authorization inventory")?;
-        cancellation.check()?;
-        Ok(())
-    };
-
-    match journal.projection().status {
-        MigrationStatus::ManualReconciliationRequired | MigrationStatus::Cancelled => {
-            return Err(anyhow!(
-                "MySQL migration journal is in a terminal non-success state"
-            ));
-        }
-        MigrationStatus::Running | MigrationStatus::Verifying | MigrationStatus::Completed => {}
-    }
-
-    require_freeze()?;
-    let (mut reader, initial_catalog) = capture_exact_source(
-        reviewed,
-        source,
-        cancellation,
-        admin_configs.source_metadata,
-        admin_configs.freeze,
-    )?;
-    let copy_contracts = mysql_copy_contracts(reviewed, &initial_catalog)?;
-    let auto_increment_contracts = mysql_auto_increment_contracts(reviewed)?;
-    let foreign_key_contracts = mysql_foreign_key_contracts(reviewed, &initial_catalog)?;
-
-    if journal.projection().status == MigrationStatus::Running {
-        reconcile_mysql_pre_data_schema_with(
-            reviewed,
-            target,
-            journal,
-            cancellation,
-            &mut require_freeze,
-            interruption,
         )?;
-        copy_mysql_tables(
+        let copy_contracts = mysql_copy_contracts(reviewed, &initial_catalog)?;
+        let auto_increment_contracts = mysql_auto_increment_contracts(reviewed)?;
+        let foreign_key_contracts = mysql_foreign_key_contracts(reviewed, &initial_catalog)?;
+
+        if journal.projection().status == MigrationStatus::Running {
+            reconcile_mysql_pre_data_schema_with(
+                reviewed,
+                target,
+                journal,
+                cancellation,
+                &mut require_freeze,
+                interruption,
+            )?;
+            copy_mysql_tables(
+                reviewed,
+                reader.as_mut(),
+                target,
+                journal,
+                cancellation,
+                &copy_contracts,
+                &mut require_freeze,
+                interruption,
+            )?;
+        }
+        drop(reader);
+
+        require_freeze()?;
+        let (mut verification_reader, final_catalog) = capture_exact_source(
             reviewed,
-            reader.as_mut(),
+            source,
+            cancellation,
+            admin_configs.source_metadata,
+            admin_configs.freeze,
+        )?;
+        verify_auto_increment_source_equality(reviewed, &final_catalog)?;
+        if journal.projection().status == MigrationStatus::Running {
+            reconcile_mysql_auto_increment(
+                target,
+                journal,
+                cancellation,
+                &auto_increment_contracts,
+                &mut require_freeze,
+                interruption,
+            )?;
+            reconcile_mysql_foreign_keys(
+                target,
+                journal,
+                cancellation,
+                &foreign_key_contracts,
+                &mut require_freeze,
+                interruption,
+            )?;
+            journal.transition_status(MigrationStatus::Verifying)?;
+        }
+        verify_mysql_auto_increment_target(target, journal, &auto_increment_contracts)?;
+
+        require_freeze()?;
+        verify_mysql_tables(
+            reviewed,
+            verification_reader.as_mut(),
             target,
             journal,
             cancellation,
             &copy_contracts,
-            &mut require_freeze,
+        )?;
+        require_freeze()?;
+        target.assert_exact_schema()?;
+        finish_mysql_schema_verification(reviewed, journal)?;
+        require_freeze()?;
+        authorization_stage.set(MySqlAuthorizationAttestationStage::Reconciling);
+        reconcile_mysql_authorization(
+            reviewed,
+            admin_configs.authorization_target,
+            journal,
+            cancellation,
             interruption,
         )?;
+        authorization_stage.set(MySqlAuthorizationAttestationStage::Exact);
     }
-    drop(reader);
-
-    require_freeze()?;
-    let (mut verification_reader, final_catalog) = capture_exact_source(
+    cancellation.check()?;
+    let current = attest().context("re-attest the external MySQL freeze after authorization")?;
+    validate_mysql_external_freeze_continuity(&accepted, &current)
+        .context("validate continuous MySQL freeze after authorization")?;
+    attest_current_mysql_source_visibility(
         reviewed,
-        source,
-        cancellation,
+        source.endpoint_config(),
         admin_configs.source_metadata,
         admin_configs.freeze,
-    )?;
-    verify_auto_increment_source_equality(reviewed, &final_catalog)?;
-    if journal.projection().status == MigrationStatus::Running {
-        reconcile_mysql_auto_increment(
-            target,
-            journal,
-            cancellation,
-            &auto_increment_contracts,
-            &mut require_freeze,
-            interruption,
-        )?;
-        reconcile_mysql_foreign_keys(
-            target,
-            journal,
-            cancellation,
-            &foreign_key_contracts,
-            &mut require_freeze,
-            interruption,
-        )?;
-        journal.transition_status(MigrationStatus::Verifying)?;
+    )
+    .context("re-attest MySQL source after authorization")?;
+    if let Some((_, contract)) = mysql_authorization_contract(reviewed)? {
+        let target_visibility = reviewed
+            .plan
+            .mysql_target_metadata_visibility
+            .as_ref()
+            .ok_or_else(|| anyhow!("reviewed MySQL plan has no target visibility evidence"))?;
+        if admin_configs
+            .authorization_target
+            .inspect_authorization(contract, target_visibility)?
+            != MySqlAuthorizationTargetState::Exact
+        {
+            return require_manual(
+                journal,
+                "final MySQL target authorization differs from the reviewed mapping".into(),
+            );
+        }
     }
-    verify_mysql_auto_increment_target(target, journal, &auto_increment_contracts)?;
-
-    require_freeze()?;
-    verify_mysql_tables(
-        reviewed,
-        verification_reader.as_mut(),
-        target,
-        journal,
-        cancellation,
-        &copy_contracts,
-    )?;
-    require_freeze()?;
-    target.assert_exact_schema()?;
-    finish_mysql_schema_verification(reviewed, journal)?;
+    if journal.projection().status == MigrationStatus::Verifying {
+        journal.transition_status(MigrationStatus::Completed)?;
+    }
     Ok(())
 }
 
@@ -1349,6 +1442,8 @@ fn attest_current_mysql_target_visibility(
     reviewed: &ReviewedPlan,
     target_config: &MySqlEndpointConfig,
     metadata_admin_config: &MySqlEndpointConfig,
+    authorization_target: &MySqlTargetFactory,
+    authorization_stage: MySqlAuthorizationAttestationStage,
 ) -> anyhow::Result<()> {
     let current_target = super::mysql::inspect_live_endpoint(target_config.clone())?;
     let current = collect_mysql_metadata_visibility(
@@ -1362,7 +1457,44 @@ fn attest_current_mysql_target_visibility(
         .mysql_target_metadata_visibility
         .as_ref()
         .ok_or_else(|| anyhow!("reviewed MySQL plan has no target metadata-visibility evidence"))?;
-    if !current.evidence.same_authorization_as(accepted)
+    let authorization = mysql_authorization_contract(reviewed)?;
+    let authorization_matches = match authorization {
+        None => current.evidence.same_authorization_as(accepted),
+        Some((_, contract)) => {
+            let binding_matches = current.evidence.endpoint_identity == accepted.endpoint_identity
+                && current.evidence.database_identity == accepted.database_identity
+                && current.evidence.server_uuid == accepted.server_uuid
+                && current.evidence.catalog_reader_tls_binding
+                    == accepted.catalog_reader_tls_binding
+                && current.evidence.metadata_administrator_tls_binding
+                    == accepted.metadata_administrator_tls_binding
+                && current.evidence.catalog_reader_account == accepted.catalog_reader_account
+                && current.evidence.metadata_administrator_account
+                    == accepted.metadata_administrator_account
+                && current.evidence.active_administrator_roles
+                    == accepted.active_administrator_roles
+                && current.evidence.effective_administrator_privileges
+                    == accepted.effective_administrator_privileges
+                && current.evidence.operational_exclusions == accepted.operational_exclusions;
+            let state = authorization_target.inspect_authorization(contract, accepted)?;
+            binding_matches
+                && match authorization_stage {
+                    MySqlAuthorizationAttestationStage::Initial => {
+                        state == MySqlAuthorizationTargetState::Absent
+                    }
+                    MySqlAuthorizationAttestationStage::Reconciling => matches!(
+                        state,
+                        MySqlAuthorizationTargetState::Absent
+                            | MySqlAuthorizationTargetState::Subset
+                            | MySqlAuthorizationTargetState::Exact
+                    ),
+                    MySqlAuthorizationAttestationStage::Exact => {
+                        state == MySqlAuthorizationTargetState::Exact
+                    }
+                }
+        }
+    };
+    if !authorization_matches
         || !super::mysql::mysql_catalog_visibility_is_complete(&current_target, &current)?
         || !current.authoritative_blockers.is_empty()
     {
@@ -2573,6 +2705,152 @@ fn verify_mysql_table(
     ))
 }
 
+fn mysql_authorization_contract(
+    reviewed: &ReviewedPlan,
+) -> anyhow::Result<Option<(&PlanOperation, &MySqlAuthorizationContract)>> {
+    let operations = reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                &operation.kind,
+                OperationKind::Vendor(name) if name == "restore_mysql_authorization"
+            )
+        })
+        .collect::<Vec<_>>();
+    match (&reviewed.plan.mysql_authorization, operations.as_slice()) {
+        (None, []) => Ok(None),
+        (Some(contract), [operation]) => {
+            let parameter: MySqlAuthorizationContract = serde_json::from_value(
+                operation
+                    .parameters
+                    .get("mysql_authorization_contract")
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!("MySQL authorization operation has no typed contract")
+                    })?,
+            )
+            .context("decode reviewed MySQL authorization contract")?;
+            if &parameter != contract
+                || operation.table.is_some()
+                || operation.dependencies.len() != 1
+                || reviewed.plan.operations.iter().all(|candidate| {
+                    candidate.id != operation.dependencies[0]
+                        || candidate.kind != OperationKind::VerifySchema
+                })
+            {
+                return Err(anyhow!(
+                    "MySQL authorization operation differs from the reviewed top-level contract"
+                ));
+            }
+            Ok(Some((operation, contract)))
+        }
+        _ => Err(anyhow!(
+            "MySQL plan has inconsistent authorization operations"
+        )),
+    }
+}
+
+fn mysql_authorization_attestation_stage(
+    reviewed: &ReviewedPlan,
+    journal: &AppendJournal,
+) -> anyhow::Result<MySqlAuthorizationAttestationStage> {
+    let Some((operation, _)) = mysql_authorization_contract(reviewed)? else {
+        return Ok(MySqlAuthorizationAttestationStage::Initial);
+    };
+    Ok(match operation_state(journal, operation.id.as_str())? {
+        OperationState::Pending | OperationState::Running => {
+            MySqlAuthorizationAttestationStage::Initial
+        }
+        OperationState::Prepared => MySqlAuthorizationAttestationStage::Reconciling,
+        OperationState::Committed | OperationState::Verified => {
+            MySqlAuthorizationAttestationStage::Exact
+        }
+    })
+}
+
+fn reconcile_mysql_authorization(
+    reviewed: &ReviewedPlan,
+    target: &MySqlTargetFactory,
+    journal: &mut AppendJournal,
+    cancellation: &CancellationToken,
+    interruption: Option<MySqlInterruptionPoint>,
+) -> anyhow::Result<()> {
+    let Some((operation, contract)) = mysql_authorization_contract(reviewed)? else {
+        return Ok(());
+    };
+    let initial = reviewed
+        .plan
+        .mysql_target_metadata_visibility
+        .as_ref()
+        .ok_or_else(|| anyhow!("reviewed MySQL plan has no target visibility evidence"))?;
+    let operation_id = operation.id.as_str();
+    let mut state = operation_state(journal, operation_id)?;
+    if state == OperationState::Pending {
+        journal.transition_operation(operation_id, OperationState::Running)?;
+        state = OperationState::Running;
+    }
+    if state == OperationState::Running {
+        journal.transition_operation(operation_id, OperationState::Prepared)?;
+        state = OperationState::Prepared;
+        interrupt_mysql_if(interruption, MySqlInterruptionPoint::AuthorizationPrepared)?;
+    }
+    if state == OperationState::Prepared {
+        cancellation.check()?;
+        #[cfg(feature = "migration-fault-injection")]
+        if let Some(MySqlInterruptionPoint::AuthorizationPartial(limit)) = interruption {
+            let observed = match target.reconcile_authorization_prefix(contract, initial, limit) {
+                Ok(observed) => observed,
+                Err(ConnectionError::InvalidRequest(reason)) => {
+                    return require_manual(journal, reason)
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if observed != MySqlAuthorizationTargetState::Subset {
+                return Err(anyhow!(
+                    "injected MySQL authorization prefix did not leave an exact reviewed subset"
+                ));
+            }
+            return Err(injected_mysql_interruption(interruption));
+        }
+        let observed = match target.reconcile_authorization(contract, initial) {
+            Ok(observed) => observed,
+            Err(ConnectionError::InvalidRequest(reason)) => return require_manual(journal, reason),
+            Err(error) => return Err(error.into()),
+        };
+        if observed == MySqlAuthorizationTargetState::Different {
+            return require_manual(
+                journal,
+                "prepared MySQL authorization differs from reviewed semantics".into(),
+            );
+        }
+        if observed != MySqlAuthorizationTargetState::Exact {
+            return Err(anyhow!(
+                "MySQL authorization is incomplete after reconciliation"
+            ));
+        }
+        interrupt_mysql_if(interruption, MySqlInterruptionPoint::AuthorizationApplied)?;
+        journal.transition_operation(operation_id, OperationState::Committed)?;
+        state = OperationState::Committed;
+        interrupt_mysql_if(interruption, MySqlInterruptionPoint::AuthorizationCommitted)?;
+    }
+    if state == OperationState::Committed {
+        if target.inspect_authorization(contract, initial)? != MySqlAuthorizationTargetState::Exact
+        {
+            return require_manual(journal, "committed MySQL authorization drifted".into());
+        }
+        journal.transition_operation(operation_id, OperationState::Verified)?;
+        state = OperationState::Verified;
+    }
+    if state == OperationState::Verified
+        && target.inspect_authorization(contract, initial)? != MySqlAuthorizationTargetState::Exact
+    {
+        return require_manual(journal, "verified MySQL authorization drifted".into());
+    }
+    Ok(())
+}
+
 fn finish_mysql_schema_verification(
     reviewed: &ReviewedPlan,
     journal: &mut AppendJournal,
@@ -2587,9 +2865,6 @@ fn finish_mysql_schema_verification(
         journal.verify_schema(reviewed.plan.source_catalog_fingerprint.clone())?;
     }
     complete_effect_operation(journal, verify_schema.id.as_str())?;
-    if journal.projection().status == MigrationStatus::Verifying {
-        journal.transition_status(MigrationStatus::Completed)?;
-    }
     Ok(())
 }
 
@@ -3196,6 +3471,7 @@ mod tests {
             }),
             mysql_metadata_visibility: Some(source_visibility),
             mysql_target_metadata_visibility: Some(target_visibility),
+            mysql_authorization: None,
             capabilities: BTreeMap::new(),
             operations: vec![operation],
             unsupported_objects: UnsupportedObjectReport::default(),
@@ -3696,6 +3972,9 @@ mod tests {
                 phase: if matches!(
                     operation.kind,
                     OperationKind::VerifyTable | OperationKind::VerifySchema
+                ) || matches!(
+                    &operation.kind,
+                    OperationKind::Vendor(name) if name == "restore_mysql_authorization"
                 ) {
                     OperationPhase::Verification
                 } else {

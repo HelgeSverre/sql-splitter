@@ -6436,6 +6436,7 @@ pub fn build_plan_with_consistency_and_contracts(
         mysql_target_snapshot_evidence: None,
         mysql_metadata_visibility: None,
         mysql_target_metadata_visibility: None,
+        mysql_authorization: None,
         capabilities: BTreeMap::from([
             (
                 "catalog_snapshot".into(),
@@ -7165,6 +7166,7 @@ pub fn build_source_assessment_with_profile(
         mysql_target_snapshot_evidence: None,
         mysql_metadata_visibility: None,
         mysql_target_metadata_visibility: None,
+        mysql_authorization: None,
         capabilities: BTreeMap::from([
             (
                 "catalog_snapshot".into(),

@@ -94,6 +94,7 @@ fn mysql_plan_is_read_only_and_requires_an_explicit_consistency_contract() {
         "--freeze-admin-config",
         "--target-config",
         "--target-metadata-admin-config",
+        "--authorization-mapping",
         "--plan-output",
         "--consistency <CONSISTENCY>",
     ] {

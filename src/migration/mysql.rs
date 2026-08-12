@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::artifact::{write_json_new, ArtifactError};
+use super::artifact::{read_json, write_json_new, ArtifactError};
 use super::canonical::{canonicalize_json, CANONICAL_ENCODING_VERSION};
 use super::connection::{
     CancellationToken, Capability, CapabilitySet, ConnectionError, ConnectionResult,
@@ -37,10 +37,10 @@ use super::mysql_profile::{
     MySqlFreezeProfileError, MySqlFreezeProfileKind, MYSQL_FREEZE_ATTESTATION_SCHEMA_VERSION,
 };
 use super::mysql_visibility::{
-    MySqlAccountIdentity, MySqlGrantInventory, MySqlGrantRecord, MySqlGrantTableColumn,
-    MySqlMetadataVisibilityEvidence, MySqlOperationalAccountExclusion,
-    MySqlOperationalAccountPurpose, MySqlProxyTarget, MySqlVisibilityError,
-    MYSQL_METADATA_VISIBILITY_SCHEMA_VERSION,
+    MySqlAccountIdentity, MySqlAuthorizationContract, MySqlAuthorizationMapping,
+    MySqlGrantInventory, MySqlGrantRecord, MySqlGrantTableColumn, MySqlMetadataVisibilityEvidence,
+    MySqlOperationalAccountExclusion, MySqlOperationalAccountPurpose, MySqlProxyTarget,
+    MySqlVisibilityError, MYSQL_METADATA_VISIBILITY_SCHEMA_VERSION,
 };
 use super::plan::{
     AssessmentStatus, MigrationPlan, MySqlSnapshotEvidence, OperationKind, PlanError,
@@ -409,6 +409,14 @@ pub enum MySqlTableState {
 pub enum MySqlAutoIncrementTargetState {
     Exact,
     BeforeDesired,
+    Different,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MySqlAuthorizationTargetState {
+    Absent,
+    Subset,
+    Exact,
     Different,
 }
 
@@ -1348,7 +1356,7 @@ pub fn build_plan(
 ) -> Result<ReviewedPlan, MySqlPlanError> {
     validate_catalog_snapshot(source)?;
     validate_catalog_snapshot(target)?;
-    build_plan_from_execution_source(source, target, None, None)
+    build_plan_from_execution_source(source, target, None, None, None)
 }
 
 /// Build a reviewed MySQL plan with separately authenticated authoritative
@@ -1358,6 +1366,35 @@ pub fn build_plan_with_visibility(
     target: &MySqlCatalogSnapshot,
     source_visibility: &MySqlMetadataVisibilityCapture,
     target_visibility: &MySqlMetadataVisibilityCapture,
+) -> Result<ReviewedPlan, MySqlPlanError> {
+    build_plan_with_visibility_internal(source, target, source_visibility, target_visibility, None)
+}
+
+/// Build a reviewed MySQL plan with an explicit, complete business-principal
+/// mapping. Target accounts must already exist; authentication data is never
+/// copied or represented in the plan.
+pub fn build_plan_with_visibility_and_authorization(
+    source: &MySqlCatalogSnapshot,
+    target: &MySqlCatalogSnapshot,
+    source_visibility: &MySqlMetadataVisibilityCapture,
+    target_visibility: &MySqlMetadataVisibilityCapture,
+    mapping: MySqlAuthorizationMapping,
+) -> Result<ReviewedPlan, MySqlPlanError> {
+    build_plan_with_visibility_internal(
+        source,
+        target,
+        source_visibility,
+        target_visibility,
+        Some(mapping),
+    )
+}
+
+fn build_plan_with_visibility_internal(
+    source: &MySqlCatalogSnapshot,
+    target: &MySqlCatalogSnapshot,
+    source_visibility: &MySqlMetadataVisibilityCapture,
+    target_visibility: &MySqlMetadataVisibilityCapture,
+    mapping: Option<MySqlAuthorizationMapping>,
 ) -> Result<ReviewedPlan, MySqlPlanError> {
     validate_catalog_snapshot(source)?;
     validate_catalog_snapshot(target)?;
@@ -1391,12 +1428,23 @@ pub fn build_plan_with_visibility(
     let mut execution_source = source.clone();
     execution_source.catalog = source_visibility.authoritative_catalog.clone();
     execution_source.blockers = source_visibility.authoritative_blockers.clone();
-    for record in source_visibility.evidence.non_operational_records() {
-        execution_source.blockers.push(MySqlCatalogBlocker {
-            object_id: mysql_grant_record_id(record)?,
-            object_kind: "privilege".into(),
-            reason: "MySQL business authorization state is inventoried but target role mapping and exact restoration are not yet implemented".into(),
-        });
+    let authorization = mapping
+        .map(|mapping| {
+            MySqlAuthorizationContract::build(
+                mapping,
+                &source_visibility.evidence,
+                &target_visibility.evidence,
+            )
+        })
+        .transpose()?;
+    if authorization.is_none() {
+        for record in source_visibility.evidence.non_operational_records() {
+            execution_source.blockers.push(MySqlCatalogBlocker {
+                object_id: mysql_grant_record_id(record)?,
+                object_kind: "privilege".into(),
+                reason: "MySQL business authorization state is inventoried but target role mapping and exact restoration are not yet implemented".into(),
+            });
+        }
     }
     execution_source.blockers.sort_by(|left, right| {
         (&left.object_id, &left.object_kind).cmp(&(&right.object_id, &right.object_kind))
@@ -1412,6 +1460,7 @@ pub fn build_plan_with_visibility(
         &execution_target,
         Some(source_visibility.evidence.clone()),
         Some(target_visibility.evidence.clone()),
+        authorization,
     )
 }
 
@@ -1420,6 +1469,7 @@ fn build_plan_from_execution_source(
     target: &MySqlCatalogSnapshot,
     source_visibility: Option<MySqlMetadataVisibilityEvidence>,
     target_visibility: Option<MySqlMetadataVisibilityEvidence>,
+    authorization: Option<MySqlAuthorizationContract>,
 ) -> Result<ReviewedPlan, MySqlPlanError> {
     validate_supported_server_version(&source.server_version)?;
     validate_supported_server_version(&target.server_version)?;
@@ -1633,6 +1683,24 @@ fn build_plan_from_execution_source(
         BTreeMap::new(),
     )?;
     operations.push(verify_schema);
+    if let Some(contract) = &authorization {
+        let verify_schema_id = operations
+            .last()
+            .ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog("MySQL plan has no schema verifier".into())
+            })?
+            .id
+            .clone();
+        operations.push(PlanOperation::new(
+            OperationKind::Vendor("restore_mysql_authorization".into()),
+            None,
+            vec![verify_schema_id],
+            BTreeMap::from([(
+                "mysql_authorization_contract".into(),
+                serde_json::to_value(contract)?,
+            )]),
+        )?);
+    }
 
     let mut unsupported = source
         .blockers
@@ -1729,6 +1797,7 @@ fn build_plan_from_execution_source(
         mysql_target_snapshot_evidence: Some(target.snapshot_evidence.clone()),
         mysql_metadata_visibility: source_visibility,
         mysql_target_metadata_visibility: target_visibility,
+        mysql_authorization: authorization,
         capabilities: BTreeMap::from([
             (
                 "catalog_snapshot".into(),
@@ -2011,6 +2080,68 @@ pub fn write_live_plan_with_visibility(
     )?;
     let reviewed =
         build_plan_with_visibility(&source, &target, &source_visibility, &target_visibility)?;
+    write_json_new(output.as_ref(), &reviewed)?;
+    Ok(reviewed)
+}
+
+/// Inspect both endpoints and publish a reviewed plan that includes an
+/// explicit protected business-account mapping artifact.
+#[allow(clippy::too_many_arguments)]
+pub fn write_live_plan_with_visibility_and_authorization(
+    source_config: impl AsRef<Path>,
+    source_metadata_admin_config: impl AsRef<Path>,
+    freeze_admin_config: impl AsRef<Path>,
+    target_config: impl AsRef<Path>,
+    target_metadata_admin_config: impl AsRef<Path>,
+    authorization_mapping: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+) -> Result<ReviewedPlan, MySqlPlanError> {
+    let source_config = MySqlEndpointConfig::read(source_config.as_ref())?;
+    let source_metadata_admin_config =
+        MySqlEndpointConfig::read(source_metadata_admin_config.as_ref())?;
+    let freeze_admin_config = MySqlEndpointConfig::read(freeze_admin_config.as_ref())?;
+    let target_config = MySqlEndpointConfig::read(target_config.as_ref())?;
+    let target_metadata_admin_config =
+        MySqlEndpointConfig::read(target_metadata_admin_config.as_ref())?;
+    let mapping: MySqlAuthorizationMapping = read_json(authorization_mapping.as_ref())?;
+    mapping.validate()?;
+    let credential_references = [
+        source_config.credential_env.as_str(),
+        source_metadata_admin_config.credential_env.as_str(),
+        freeze_admin_config.credential_env.as_str(),
+        target_config.credential_env.as_str(),
+        target_metadata_admin_config.credential_env.as_str(),
+    ];
+    if credential_references
+        .iter()
+        .enumerate()
+        .any(|(index, value)| credential_references[..index].contains(value))
+    {
+        return Err(MySqlPlanError::InvalidConfig(
+            "source reader, source metadata administrator, freeze administrator, target writer, and target metadata administrator must use separate credential references",
+        ));
+    }
+    let source = inspect_live_endpoint(source_config.clone())?;
+    let source_visibility = collect_mysql_metadata_visibility(
+        &source,
+        &source_config,
+        &source_metadata_admin_config,
+        Some(&freeze_admin_config),
+    )?;
+    let target = inspect_live_endpoint(target_config.clone())?;
+    let target_visibility = collect_mysql_metadata_visibility(
+        &target,
+        &target_config,
+        &target_metadata_admin_config,
+        None,
+    )?;
+    let reviewed = build_plan_with_visibility_and_authorization(
+        &source,
+        &target,
+        &source_visibility,
+        &target_visibility,
+        mapping,
+    )?;
     write_json_new(output.as_ref(), &reviewed)?;
     Ok(reviewed)
 }
@@ -3069,6 +3200,92 @@ impl MySqlTargetFactory {
         }
         self.cancellation.check()?;
         self.inspect_foreign_key(expected)
+    }
+
+    /// Inspect effective business authorization without treating historical
+    /// table/routine grantor provenance as an access-control semantic.
+    pub fn inspect_authorization(
+        &self,
+        expected: &MySqlAuthorizationContract,
+        initial: &MySqlMetadataVisibilityEvidence,
+    ) -> ConnectionResult<MySqlAuthorizationTargetState> {
+        expected
+            .mapping
+            .validate()
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        expected
+            .translated_inventory
+            .validate()
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        initial
+            .validate()
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let (mut conn, _registration) = self.controlled_connect()?;
+        let observed = collect_mysql_grant_inventory(&mut conn, &self.config.database)
+            .map_err(plan_connection_error)?;
+        self.cancellation.check()?;
+        classify_mysql_authorization_inventory(&observed, initial, &expected.translated_inventory)
+    }
+
+    /// Apply only missing reviewed grants. Every statement is create-only or
+    /// idempotent. MySQL grant statements can commit implicitly, so callers
+    /// must persist Prepared before this method and re-inspect on resume.
+    pub fn reconcile_authorization(
+        &self,
+        expected: &MySqlAuthorizationContract,
+        initial: &MySqlMetadataVisibilityEvidence,
+    ) -> ConnectionResult<MySqlAuthorizationTargetState> {
+        self.apply_authorization_statements(expected, initial, None)
+    }
+
+    /// Apply a deterministic prefix of the reviewed statements for the live
+    /// implicit-commit recovery matrix.
+    #[cfg(feature = "migration-fault-injection")]
+    pub(crate) fn reconcile_authorization_prefix(
+        &self,
+        expected: &MySqlAuthorizationContract,
+        initial: &MySqlMetadataVisibilityEvidence,
+        statement_limit: usize,
+    ) -> ConnectionResult<MySqlAuthorizationTargetState> {
+        if statement_limit == 0 {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL authorization fault prefix must contain at least one statement".into(),
+            ));
+        }
+        self.apply_authorization_statements(expected, initial, Some(statement_limit))
+    }
+
+    fn apply_authorization_statements(
+        &self,
+        expected: &MySqlAuthorizationContract,
+        initial: &MySqlMetadataVisibilityEvidence,
+        statement_limit: Option<usize>,
+    ) -> ConnectionResult<MySqlAuthorizationTargetState> {
+        match self.inspect_authorization(expected, initial)? {
+            MySqlAuthorizationTargetState::Exact => {
+                return Ok(MySqlAuthorizationTargetState::Exact)
+            }
+            MySqlAuthorizationTargetState::Different => {
+                return Err(ConnectionError::InvalidRequest(
+                    "MySQL target business authorization differs from the reviewed mapping".into(),
+                ))
+            }
+            MySqlAuthorizationTargetState::Absent | MySqlAuthorizationTargetState::Subset => {}
+        }
+        let statements = render_mysql_authorization_statements(&expected.translated_inventory)?;
+        let (mut conn, _registration) = self.controlled_connect()?;
+        for statement in statements
+            .into_iter()
+            .take(statement_limit.unwrap_or(usize::MAX))
+        {
+            self.cancellation.check()?;
+            if let Err(error) = conn.query_drop(statement) {
+                self.cancellation.check()?;
+                return Err(database_error(error));
+            }
+        }
+        self.cancellation.check()?;
+        self.inspect_authorization(expected, initial)
     }
 
     fn target_foreign_key(&self, expected: &MySqlForeignKey) -> ConnectionResult<MySqlForeignKey> {
@@ -4405,6 +4622,502 @@ fn render_mysql_add_foreign_key(foreign_key: &MySqlForeignKey) -> ConnectionResu
         mysql_foreign_key_action_sql(foreign_key.update_action),
         mysql_foreign_key_action_sql(foreign_key.delete_action),
     ))
+}
+
+fn classify_mysql_authorization_inventory(
+    observed: &MySqlGrantInventory,
+    initial: &MySqlMetadataVisibilityEvidence,
+    expected_business: &MySqlGrantInventory,
+) -> ConnectionResult<MySqlAuthorizationTargetState> {
+    observed
+        .validate()
+        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+    let initial_inventory = &initial.grant_inventory;
+    if observed.partial_revokes_enabled != initial_inventory.partial_revokes_enabled
+        || observed.grant_table_columns != initial_inventory.grant_table_columns
+        || observed.accounts != initial_inventory.accounts
+        || observed.unknown_privilege_classes != initial_inventory.unknown_privilege_classes
+    {
+        return Ok(MySqlAuthorizationTargetState::Different);
+    }
+    let mapped_accounts = expected_business.accounts.iter().collect::<BTreeSet<_>>();
+    let partition = |records: &[MySqlGrantRecord]| {
+        let mut base = Vec::new();
+        let mut mapped = Vec::new();
+        let mut mixed = false;
+        for record in records {
+            let involved = record.involved_accounts();
+            let has_mapped = involved
+                .iter()
+                .any(|account| mapped_accounts.contains(account));
+            let has_unmapped = involved
+                .iter()
+                .any(|account| !mapped_accounts.contains(account));
+            if has_mapped && has_unmapped {
+                mixed = true;
+            } else if has_mapped {
+                mapped.push(record.clone());
+            } else {
+                base.push(record.clone());
+            }
+        }
+        (base, mapped, mixed)
+    };
+    let (initial_base, initial_mapped, initial_mixed) = partition(&initial_inventory.records);
+    let (observed_base, observed_mapped, observed_mixed) = partition(&observed.records);
+    if initial_mixed
+        || observed_mixed
+        || !initial_mapped.is_empty()
+        || initial_base != observed_base
+    {
+        return Ok(MySqlAuthorizationTargetState::Different);
+    }
+    let effective = |records: &[MySqlGrantRecord]| -> ConnectionResult<BTreeSet<Vec<u8>>> {
+        let keys = records
+            .iter()
+            .map(MySqlGrantRecord::effective_authorization_key)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+        let set = keys.iter().cloned().collect::<BTreeSet<_>>();
+        if set.len() != keys.len() {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL authorization contains duplicate effective records".into(),
+            ));
+        }
+        Ok(set)
+    };
+    let observed = effective(&observed_mapped)?;
+    let expected = effective(&expected_business.records)?;
+    if observed == expected {
+        Ok(MySqlAuthorizationTargetState::Exact)
+    } else if observed.is_subset(&expected) {
+        Ok(if observed.is_empty() {
+            MySqlAuthorizationTargetState::Absent
+        } else {
+            MySqlAuthorizationTargetState::Subset
+        })
+    } else {
+        Ok(MySqlAuthorizationTargetState::Different)
+    }
+}
+
+#[derive(Default)]
+struct MySqlScopedGrantGroup {
+    privileges: BTreeSet<String>,
+    column_privileges: BTreeMap<String, BTreeSet<String>>,
+    grant_option: bool,
+}
+
+/// Render the closed typed authorization inventory. No password, plugin, raw
+/// account clause, or unvalidated privilege token enters these statements.
+fn render_mysql_authorization_statements(
+    inventory: &MySqlGrantInventory,
+) -> ConnectionResult<Vec<String>> {
+    inventory
+        .validate()
+        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+    let mut global = BTreeMap::<MySqlAccountIdentity, MySqlScopedGrantGroup>::new();
+    let mut database = BTreeMap::<(MySqlAccountIdentity, String), MySqlScopedGrantGroup>::new();
+    let mut table =
+        BTreeMap::<(MySqlAccountIdentity, String, String), MySqlScopedGrantGroup>::new();
+    let mut routine =
+        BTreeMap::<(MySqlAccountIdentity, String, String, String), MySqlScopedGrantGroup>::new();
+    let mut dynamic = Vec::new();
+    let mut proxy = Vec::new();
+    let mut role_edges = Vec::new();
+    let mut default_roles = Vec::new();
+    let mut partial_revokes = Vec::new();
+    for record in &inventory.records {
+        match record {
+            MySqlGrantRecord::StaticGlobal { account, privilege } => {
+                let group = global.entry(account.clone()).or_default();
+                if privilege == "GRANT" {
+                    group.grant_option = true;
+                } else {
+                    require_mysql_static_privilege(privilege)?;
+                    group.privileges.insert(privilege.clone());
+                }
+            }
+            MySqlGrantRecord::DynamicGlobal { .. } => dynamic.push(record),
+            MySqlGrantRecord::Database {
+                account,
+                database: name,
+                privilege,
+            } => {
+                let group = database.entry((account.clone(), name.clone())).or_default();
+                if privilege == "GRANT" {
+                    group.grant_option = true;
+                } else {
+                    require_mysql_static_privilege(privilege)?;
+                    group.privileges.insert(privilege.clone());
+                }
+            }
+            MySqlGrantRecord::Table {
+                account,
+                database: name,
+                table: table_name,
+                privilege,
+                ..
+            } => {
+                let group = table
+                    .entry((account.clone(), name.clone(), table_name.clone()))
+                    .or_default();
+                if privilege == "GRANT" {
+                    group.grant_option = true;
+                } else if let Some(column_privilege) = privilege.strip_prefix("COLUMN::") {
+                    require_mysql_table_privilege(column_privilege)?;
+                } else {
+                    require_mysql_table_privilege(privilege)?;
+                    group.privileges.insert(privilege.clone());
+                }
+            }
+            MySqlGrantRecord::Column {
+                account,
+                database: name,
+                table: table_name,
+                column,
+                privilege,
+            } => {
+                require_mysql_column_privilege(privilege)?;
+                table
+                    .entry((account.clone(), name.clone(), table_name.clone()))
+                    .or_default()
+                    .column_privileges
+                    .entry(privilege.clone())
+                    .or_default()
+                    .insert(column.clone());
+            }
+            MySqlGrantRecord::Routine {
+                account,
+                database: name,
+                routine: routine_name,
+                routine_type,
+                privilege,
+                ..
+            } => {
+                if !matches!(routine_type.as_str(), "FUNCTION" | "PROCEDURE") {
+                    return Err(ConnectionError::InvalidRequest(
+                        "MySQL routine grant has an unsupported routine type".into(),
+                    ));
+                }
+                let group = routine
+                    .entry((
+                        account.clone(),
+                        name.clone(),
+                        routine_name.clone(),
+                        routine_type.clone(),
+                    ))
+                    .or_default();
+                if privilege == "GRANT" {
+                    group.grant_option = true;
+                } else {
+                    require_mysql_routine_privilege(privilege)?;
+                    group.privileges.insert(privilege.clone());
+                }
+            }
+            MySqlGrantRecord::Proxy { .. } => proxy.push(record),
+            MySqlGrantRecord::RoleEdge { .. } => role_edges.push(record),
+            MySqlGrantRecord::DefaultRole { .. } => default_roles.push(record),
+            MySqlGrantRecord::PartialRevoke { .. } => partial_revokes.push(record),
+        }
+    }
+    let mut statements = Vec::new();
+    for (account, group) in global {
+        if group.privileges.is_empty() && !group.grant_option {
+            continue;
+        }
+        let privileges = if group.privileges.is_empty() {
+            "USAGE".into()
+        } else {
+            group.privileges.into_iter().collect::<Vec<_>>().join(", ")
+        };
+        statements.push(format!(
+            "GRANT {privileges} ON *.* TO {}{}",
+            quote_mysql_account(&account),
+            if group.grant_option {
+                " WITH GRANT OPTION"
+            } else {
+                ""
+            }
+        ));
+    }
+    for ((account, name), group) in database {
+        statements.push(render_mysql_scoped_grant(
+            group,
+            format!("{}.*", quote_identifier_text(&name)),
+            &account,
+        )?);
+    }
+    for ((account, name, table_name), group) in table {
+        let mut privileges = group.privileges.into_iter().collect::<Vec<_>>();
+        for (privilege, columns) in group.column_privileges {
+            privileges.push(format!(
+                "{privilege} ({})",
+                columns
+                    .into_iter()
+                    .map(|column| quote_identifier_text(&column))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if privileges.is_empty() {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL table grant option has no underlying privilege".into(),
+            ));
+        }
+        statements.push(format!(
+            "GRANT {} ON {}.{} TO {}{}",
+            privileges.join(", "),
+            quote_identifier_text(&name),
+            quote_identifier_text(&table_name),
+            quote_mysql_account(&account),
+            if group.grant_option {
+                " WITH GRANT OPTION"
+            } else {
+                ""
+            }
+        ));
+    }
+    for ((account, name, routine_name, routine_type), group) in routine {
+        if group.privileges.is_empty() {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL routine grant option has no underlying privilege".into(),
+            ));
+        }
+        statements.push(format!(
+            "GRANT {} ON {routine_type} {}.{} TO {}{}",
+            group.privileges.into_iter().collect::<Vec<_>>().join(", "),
+            quote_identifier_text(&name),
+            quote_identifier_text(&routine_name),
+            quote_mysql_account(&account),
+            if group.grant_option {
+                " WITH GRANT OPTION"
+            } else {
+                ""
+            }
+        ));
+    }
+    for record in dynamic {
+        let MySqlGrantRecord::DynamicGlobal {
+            account,
+            privilege,
+            grantable,
+        } = record
+        else {
+            unreachable!()
+        };
+        require_mysql_dynamic_privilege(privilege)?;
+        statements.push(format!(
+            "GRANT {privilege} ON *.* TO {}{}",
+            quote_mysql_account(account),
+            if *grantable { " WITH GRANT OPTION" } else { "" }
+        ));
+    }
+    for record in proxy {
+        let MySqlGrantRecord::Proxy {
+            account,
+            target,
+            grantable,
+        } = record
+        else {
+            unreachable!()
+        };
+        let target = match target {
+            MySqlProxyTarget::Account { account } => quote_mysql_account(account),
+            MySqlProxyTarget::AnyAccount => "''@''".into(),
+        };
+        statements.push(format!(
+            "GRANT PROXY ON {target} TO {}{}",
+            quote_mysql_account(account),
+            if *grantable { " WITH GRANT OPTION" } else { "" }
+        ));
+    }
+    for record in role_edges {
+        let MySqlGrantRecord::RoleEdge {
+            role,
+            grantee,
+            admin_option,
+        } = record
+        else {
+            unreachable!()
+        };
+        statements.push(format!(
+            "GRANT {} TO {}{}",
+            quote_mysql_account(role),
+            quote_mysql_account(grantee),
+            if *admin_option {
+                " WITH ADMIN OPTION"
+            } else {
+                ""
+            }
+        ));
+    }
+    for record in default_roles {
+        let MySqlGrantRecord::DefaultRole { account, role } = record else {
+            unreachable!()
+        };
+        statements.push(format!(
+            "SET DEFAULT ROLE {} TO {}",
+            quote_mysql_account(role),
+            quote_mysql_account(account)
+        ));
+    }
+    for record in partial_revokes {
+        let MySqlGrantRecord::PartialRevoke {
+            account,
+            database,
+            privileges,
+        } = record
+        else {
+            unreachable!()
+        };
+        for privilege in privileges {
+            require_mysql_static_privilege(privilege)?;
+        }
+        statements.push(format!(
+            "REVOKE {} ON {}.* FROM {}",
+            privileges.join(", "),
+            quote_identifier_text(database),
+            quote_mysql_account(account)
+        ));
+    }
+    Ok(statements)
+}
+
+fn render_mysql_scoped_grant(
+    group: MySqlScopedGrantGroup,
+    scope: String,
+    account: &MySqlAccountIdentity,
+) -> ConnectionResult<String> {
+    if group.privileges.is_empty() {
+        return Err(ConnectionError::InvalidRequest(
+            "MySQL scoped grant option has no underlying privilege".into(),
+        ));
+    }
+    Ok(format!(
+        "GRANT {} ON {scope} TO {}{}",
+        group.privileges.into_iter().collect::<Vec<_>>().join(", "),
+        quote_mysql_account(account),
+        if group.grant_option {
+            " WITH GRANT OPTION"
+        } else {
+            ""
+        }
+    ))
+}
+
+fn quote_mysql_account(account: &MySqlAccountIdentity) -> String {
+    format!(
+        "{}@{}",
+        quote_mysql_string_literal(&account.user),
+        quote_mysql_string_literal(&account.host)
+    )
+}
+
+fn quote_mysql_string_literal(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for character in value.chars() {
+        match character {
+            '\0' => quoted.push_str("\\0"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\u{1a}' => quoted.push_str("\\Z"),
+            '\\' => quoted.push_str("\\\\"),
+            '\'' => quoted.push_str("\\'"),
+            value => quoted.push(value),
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn require_mysql_static_privilege(privilege: &str) -> ConnectionResult<()> {
+    const VALUES: &[&str] = &[
+        "ALTER",
+        "ALTER ROUTINE",
+        "CREATE",
+        "CREATE ROLE",
+        "CREATE ROUTINE",
+        "CREATE TABLESPACE",
+        "CREATE TEMPORARY TABLES",
+        "CREATE USER",
+        "CREATE VIEW",
+        "DELETE",
+        "DROP",
+        "DROP ROLE",
+        "EVENT",
+        "EXECUTE",
+        "FILE",
+        "INDEX",
+        "INSERT",
+        "LOCK TABLES",
+        "PROCESS",
+        "REFERENCES",
+        "RELOAD",
+        "REPLICATION CLIENT",
+        "REPLICATION SLAVE",
+        "SELECT",
+        "SHOW DATABASES",
+        "SHOW VIEW",
+        "SHUTDOWN",
+        "SUPER",
+        "TRIGGER",
+        "UPDATE",
+    ];
+    require_mysql_privilege_in(privilege, VALUES)
+}
+
+fn require_mysql_table_privilege(privilege: &str) -> ConnectionResult<()> {
+    require_mysql_privilege_in(
+        privilege,
+        &[
+            "ALTER",
+            "CREATE",
+            "CREATE VIEW",
+            "DELETE",
+            "DROP",
+            "INDEX",
+            "INSERT",
+            "REFERENCES",
+            "SELECT",
+            "SHOW VIEW",
+            "TRIGGER",
+            "UPDATE",
+        ],
+    )
+}
+
+fn require_mysql_column_privilege(privilege: &str) -> ConnectionResult<()> {
+    require_mysql_privilege_in(privilege, &["INSERT", "REFERENCES", "SELECT", "UPDATE"])
+}
+
+fn require_mysql_routine_privilege(privilege: &str) -> ConnectionResult<()> {
+    require_mysql_privilege_in(privilege, &["ALTER ROUTINE", "EXECUTE"])
+}
+
+fn require_mysql_privilege_in(privilege: &str, values: &[&str]) -> ConnectionResult<()> {
+    if values.contains(&privilege) {
+        Ok(())
+    } else {
+        Err(ConnectionError::InvalidRequest(
+            "MySQL authorization contains an unsupported privilege token".into(),
+        ))
+    }
+}
+
+fn require_mysql_dynamic_privilege(privilege: &str) -> ConnectionResult<()> {
+    if !privilege.is_empty()
+        && privilege
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        Ok(())
+    } else {
+        Err(ConnectionError::InvalidRequest(
+            "MySQL authorization contains an unsafe dynamic privilege token".into(),
+        ))
+    }
 }
 
 fn validate_mysql_foreign_key_shape(foreign_key: &MySqlForeignKey) -> ConnectionResult<()> {
@@ -7462,6 +8175,79 @@ mod tests {
         assert!(parse_mysql_zero_one("field", 1).unwrap());
         assert!(!parse_mysql_zero_one("field", 0).unwrap());
         assert!(parse_mysql_zero_one("field", 2).is_err());
+    }
+
+    #[test]
+    fn authorization_renderer_is_typed_ordered_and_quotes_hostile_accounts() {
+        let account = MySqlAccountIdentity {
+            user: "reader'; DROP USER root; --".into(),
+            host: "host\\name".into(),
+        };
+        let role = MySqlAccountIdentity {
+            user: "reporting_role".into(),
+            host: "%".into(),
+        };
+        let mut records = vec![
+            MySqlGrantRecord::Database {
+                account: account.clone(),
+                database: "target-db".into(),
+                privilege: "SELECT".into(),
+            },
+            MySqlGrantRecord::Database {
+                account: account.clone(),
+                database: "target-db".into(),
+                privilege: "GRANT".into(),
+            },
+            MySqlGrantRecord::Table {
+                account: account.clone(),
+                database: "target-db".into(),
+                table: "line items".into(),
+                privilege: "COLUMN::UPDATE".into(),
+                grantor: "admin@%".into(),
+            },
+            MySqlGrantRecord::Column {
+                account: account.clone(),
+                database: "target-db".into(),
+                table: "line items".into(),
+                column: "display name".into(),
+                privilege: "UPDATE".into(),
+            },
+            MySqlGrantRecord::RoleEdge {
+                role: role.clone(),
+                grantee: account.clone(),
+                admin_option: true,
+            },
+            MySqlGrantRecord::DefaultRole {
+                account: account.clone(),
+                role: role.clone(),
+            },
+            MySqlGrantRecord::PartialRevoke {
+                account: account.clone(),
+                database: "target-db".into(),
+                privileges: vec!["SELECT".into()],
+            },
+        ];
+        records.sort();
+        let mut accounts = vec![account, role];
+        accounts.sort();
+        let inventory = MySqlGrantInventory {
+            partial_revokes_enabled: true,
+            grant_table_columns: Vec::new(),
+            accounts,
+            records,
+            unknown_privilege_classes: Vec::new(),
+        };
+        let statements = render_mysql_authorization_statements(&inventory).unwrap();
+        assert_eq!(statements.len(), 5);
+        assert!(statements[0].starts_with(
+            "GRANT SELECT ON `target-db`.* TO 'reader\\'; DROP USER root; --'@'host\\\\name' WITH GRANT OPTION"
+        ));
+        assert!(statements[1].contains(
+            "GRANT UPDATE (`display name`) ON `target-db`.`line items` TO 'reader\\'; DROP USER root; --'@'host\\\\name'"
+        ));
+        assert!(statements[2].starts_with("GRANT 'reporting_role'@'%' TO "));
+        assert!(statements[3].starts_with("SET DEFAULT ROLE 'reporting_role'@'%' TO "));
+        assert!(statements[4].starts_with("REVOKE SELECT ON `target-db`.* FROM "));
     }
 
     #[test]

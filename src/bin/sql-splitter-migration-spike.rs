@@ -113,6 +113,9 @@ enum Command {
         /// Separately authenticated target metadata administrator TOML.
         #[arg(long)]
         target_metadata_admin_config: PathBuf,
+        /// Protected explicit source-to-target business-account mapping.
+        #[arg(long)]
+        authorization_mapping: PathBuf,
         /// New protected plan artifact. Existing files are not replaced.
         #[arg(long)]
         plan_output: PathBuf,
@@ -394,6 +397,7 @@ fn main() -> anyhow::Result<()> {
             freeze_admin_config,
             target_config,
             target_metadata_admin_config,
+            authorization_mapping,
             plan_output,
             consistency,
         } => {
@@ -402,14 +406,16 @@ fn main() -> anyhow::Result<()> {
                     "MySQL Phase 6 uses --consistency consistent-snapshot plus separate continuous DML/DDL freeze evidence"
                 );
             }
-            let plan = sql_splitter::migration::mysql::write_live_plan_with_visibility(
-                source_config,
-                source_metadata_admin_config,
-                freeze_admin_config,
-                target_config,
-                target_metadata_admin_config,
-                &plan_output,
-            )?;
+            let plan =
+                sql_splitter::migration::mysql::write_live_plan_with_visibility_and_authorization(
+                    source_config,
+                    source_metadata_admin_config,
+                    freeze_admin_config,
+                    target_config,
+                    target_metadata_admin_config,
+                    authorization_mapping,
+                    &plan_output,
+                )?;
             println!("plan: {}", plan_output.display());
             println!("plan hash: {}", plan.plan_hash);
             println!(

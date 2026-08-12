@@ -9,12 +9,13 @@ use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::model::{QualifiedTable, VendorCatalog};
 use super::mysql_profile::{MySqlFreezeProfileContract, MySqlFreezeProfileError};
 use super::mysql_visibility::{
-    MySqlGrantRecord, MySqlMetadataVisibilityEvidence, MySqlVisibilityError,
+    MySqlAuthorizationContract, MySqlGrantRecord, MySqlMetadataVisibilityEvidence,
+    MySqlVisibilityError,
 };
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 11;
+pub const PLAN_SCHEMA_VERSION: u16 = 12;
 pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: &str = "mysql_same_dialect_exact";
 pub const MYSQL_STRICT_SQL_MODE: &str =
     "NO_AUTO_VALUE_ON_ZERO,STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION";
@@ -328,6 +329,8 @@ pub struct MigrationPlan {
     pub mysql_metadata_visibility: Option<MySqlMetadataVisibilityEvidence>,
     #[serde(default)]
     pub mysql_target_metadata_visibility: Option<MySqlMetadataVisibilityEvidence>,
+    #[serde(default)]
+    pub mysql_authorization: Option<MySqlAuthorizationContract>,
     pub capabilities: BTreeMap<String, String>,
     pub operations: Vec<PlanOperation>,
     pub unsupported_objects: UnsupportedObjectReport,
@@ -472,7 +475,12 @@ impl MigrationPlan {
                     {
                         return Err(PlanError::InvalidMySqlMetadataVisibility);
                     }
-                    validate_mysql_privilege_blockers(visibility, &self.unsupported_objects)?;
+                    validate_mysql_authorization_contract(
+                        visibility,
+                        self.mysql_target_metadata_visibility.as_ref(),
+                        self.mysql_authorization.as_ref(),
+                        &self.unsupported_objects,
+                    )?;
                 } else if !self
                     .unsupported_objects
                     .objects
@@ -571,7 +579,8 @@ impl MigrationPlan {
         if source_catalog.dialect != "mysql"
             && (self.mysql_source_profile.is_some()
                 || self.mysql_metadata_visibility.is_some()
-                || self.mysql_target_metadata_visibility.is_some())
+                || self.mysql_target_metadata_visibility.is_some()
+                || self.mysql_authorization.is_some())
         {
             return Err(PlanError::UnexpectedMySqlSnapshotEvidence);
         }
@@ -660,11 +669,13 @@ impl MigrationPlan {
     }
 }
 
-fn validate_mysql_privilege_blockers(
-    visibility: &MySqlMetadataVisibilityEvidence,
+fn validate_mysql_authorization_contract(
+    source: &MySqlMetadataVisibilityEvidence,
+    target: Option<&MySqlMetadataVisibilityEvidence>,
+    authorization: Option<&MySqlAuthorizationContract>,
     unsupported: &UnsupportedObjectReport,
 ) -> Result<(), PlanError> {
-    let expected = visibility
+    let expected = source
         .non_operational_records()
         .into_iter()
         .map(MySqlGrantRecord::canonical_id)
@@ -682,8 +693,16 @@ fn validate_mysql_privilege_blockers(
             Ok(finding.object_id.clone())
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    if expected != actual {
-        return Err(PlanError::InvalidMySqlMetadataVisibility);
+    match authorization {
+        Some(contract) => {
+            let target = target.ok_or(PlanError::InvalidMySqlMetadataVisibility)?;
+            contract.validate_against(source, target)?;
+            if !actual.is_empty() {
+                return Err(PlanError::InvalidMySqlMetadataVisibility);
+            }
+        }
+        None if expected == actual => {}
+        None => return Err(PlanError::InvalidMySqlMetadataVisibility),
     }
     Ok(())
 }
@@ -947,6 +966,7 @@ mod tests {
             mysql_target_snapshot_evidence: None,
             mysql_metadata_visibility: None,
             mysql_target_metadata_visibility: None,
+            mysql_authorization: None,
             capabilities: BTreeMap::new(),
             operations: vec![PlanOperation::new(
                 OperationKind::VerifySchema,
@@ -967,6 +987,17 @@ mod tests {
         assert!(matches!(
             changed.validate(),
             Err(PlanError::HashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn prior_plan_schema_is_rejected_at_the_version_boundary() {
+        let mut value = plan();
+        value.schema_version = PLAN_SCHEMA_VERSION - 1;
+        assert!(matches!(
+            value.validate(),
+            Err(PlanError::UnsupportedVersion { found })
+                if found == PLAN_SCHEMA_VERSION - 1
         ));
     }
 

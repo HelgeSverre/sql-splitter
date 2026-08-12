@@ -147,6 +147,7 @@ CREATE DATABASE migration_values_source CHARACTER SET utf8mb4 COLLATE utf8mb4_09
 CREATE DATABASE migration_fk_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_integrity_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_security_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_authorization_source CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_source'@'%' IDENTIFIED BY 'sourcepass' REQUIRE X509;
 CREATE USER 'migration_target'@'%' IDENTIFIED BY 'targetpass' REQUIRE X509;
 CREATE USER 'migration_admin'@'%' IDENTIFIED BY 'adminpass' REQUIRE X509;
@@ -156,6 +157,10 @@ CREATE USER 'business_reader'@'%' IDENTIFIED BY 'unusedpass' REQUIRE X509;
 CREATE USER 'partially_restricted_reader'@'%' IDENTIFIED BY 'unusedpass' REQUIRE X509;
 CREATE USER 'migration_execution_source'@'%' IDENTIFIED BY 'execsourcepass' REQUIRE X509;
 CREATE USER 'tls_no_client'@'%' IDENTIFIED BY 'tlsnoclientpass';
+CREATE USER 'auth_reader'@'%' IDENTIFIED BY 'sourceauthpass' REQUIRE X509;
+CREATE USER 'auth_global'@'%' IDENTIFIED BY 'sourceauthpass' REQUIRE X509;
+CREATE USER 'auth_proxy'@'%' IDENTIFIED BY 'sourceauthpass' REQUIRE X509;
+CREATE ROLE 'auth_role'@'%';
 CREATE ROLE 'source_metadata_role'@'%';
 CREATE ROLE 'target_metadata_role'@'%';
 GRANT SELECT, SHOW VIEW ON migration_source.* TO 'migration_source'@'%';
@@ -180,12 +185,14 @@ GRANT SELECT, SHOW VIEW ON migration_values_source.* TO 'migration_execution_sou
 GRANT SELECT, SHOW VIEW ON migration_fk_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT, SHOW VIEW ON migration_integrity_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT, SHOW VIEW ON migration_security_source.* TO 'migration_execution_source'@'%';
+GRANT SELECT, SHOW VIEW ON migration_authorization_source.* TO 'migration_execution_source'@'%';
 GRANT SELECT, SHOW VIEW ON migration_security_source.* TO 'tls_no_client'@'%';
 GRANT SYSTEM_USER ON *.* TO 'tls_no_client'@'%';
 GRANT SELECT ON migration_values_source.* TO 'migration_admin'@'%';
 GRANT SELECT ON migration_fk_source.* TO 'migration_admin'@'%';
 GRANT SELECT ON migration_integrity_source.* TO 'migration_admin'@'%';
 GRANT SELECT ON migration_security_source.* TO 'migration_admin'@'%';
+GRANT SELECT ON migration_authorization_source.* TO 'migration_admin'@'%';
 FLUSH PRIVILEGES;
 USE migration_source;
 CREATE TABLE items (
@@ -377,6 +384,12 @@ CREATE TABLE `hostile``table;--` (
   `payload``text` VARCHAR(96) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL
 ) ENGINE=InnoDB;
 INSERT INTO `hostile``table;--` VALUES (7, 'row-secret-needle-7f99');
+USE migration_authorization_source;
+CREATE TABLE authorization_items (
+  id BIGINT NOT NULL PRIMARY KEY,
+  payload VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO authorization_items VALUES (1, 'authorization-one'), (2, 'authorization-two');
 SQL
 
 write_config() {
@@ -468,9 +481,29 @@ CREATE DATABASE migration_fk_target_committed CHARACTER SET utf8mb4 COLLATE utf8
 CREATE DATABASE migration_fk_target_violation CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_integrity_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE DATABASE migration_security_target CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_authorization_target_prepared CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_authorization_target_partial CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_authorization_target_applied CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE migration_authorization_target_committed CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 CREATE USER 'migration_execution_target'@'%' IDENTIFIED BY 'exectargetpass' REQUIRE X509;
 CREATE USER 'execution_target_metadata_admin'@'%' IDENTIFIED BY 'exectargetmetapass' REQUIRE X509;
 CREATE USER 'tls_no_client'@'%' IDENTIFIED BY 'tlsnoclientpass';
+CREATE USER 'mapped_reader_prepared'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE USER 'mapped_global_prepared'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE USER 'mapped_proxy_prepared'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE ROLE 'mapped_role_prepared'@'%';
+CREATE USER 'mapped_reader_partial'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE USER 'mapped_global_partial'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE USER 'mapped_proxy_partial'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE ROLE 'mapped_role_partial'@'%';
+CREATE USER 'mapped_reader_applied'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE USER 'mapped_global_applied'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE USER 'mapped_proxy_applied'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE ROLE 'mapped_role_applied'@'%';
+CREATE USER 'mapped_reader_committed'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE USER 'mapped_global_committed'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE USER 'mapped_proxy_committed'@'%' IDENTIFIED BY 'mappedpass' REQUIRE X509;
+CREATE ROLE 'mapped_role_committed'@'%';
 CREATE ROLE 'execution_target_metadata_role'@'%';
 GRANT ALL PRIVILEGES ON migration_execution_target.* TO 'migration_execution_target'@'%';
 GRANT ALL PRIVILEGES ON migration_values_target.* TO 'migration_execution_target'@'%';
@@ -479,10 +512,18 @@ GRANT ALL PRIVILEGES ON migration_fk_target_committed.* TO 'migration_execution_
 GRANT ALL PRIVILEGES ON migration_fk_target_violation.* TO 'migration_execution_target'@'%';
 GRANT ALL PRIVILEGES ON migration_integrity_target.* TO 'migration_execution_target'@'%';
 GRANT ALL PRIVILEGES ON migration_security_target.* TO 'migration_execution_target'@'%';
+GRANT ALL PRIVILEGES ON migration_authorization_target_prepared.* TO 'migration_execution_target'@'%';
+GRANT ALL PRIVILEGES ON migration_authorization_target_partial.* TO 'migration_execution_target'@'%';
+GRANT ALL PRIVILEGES ON migration_authorization_target_applied.* TO 'migration_execution_target'@'%';
+GRANT ALL PRIVILEGES ON migration_authorization_target_committed.* TO 'migration_execution_target'@'%';
 GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON *.* TO 'execution_target_metadata_admin'@'%';
+GRANT SELECT, UPDATE, DELETE ON *.* TO 'execution_target_metadata_admin'@'%' WITH GRANT OPTION;
+GRANT CONNECTION_ADMIN, ROLE_ADMIN ON *.* TO 'execution_target_metadata_admin'@'%' WITH GRANT OPTION;
+GRANT PROXY ON ''@'' TO 'execution_target_metadata_admin'@'%' WITH GRANT OPTION;
 GRANT SHOW_ROUTINE ON *.* TO 'execution_target_metadata_role'@'%';
 GRANT 'execution_target_metadata_role'@'%' TO 'execution_target_metadata_admin'@'%';
 GRANT SYSTEM_USER ON *.* TO 'tls_no_client'@'%';
+SET PERSIST partial_revokes = ON;
 SQL
 
 execution_source_config="$test_dir/execution-source.toml"
@@ -514,6 +555,9 @@ security_source_metadata_config="$test_dir/security-source-metadata.toml"
 security_freeze_config="$test_dir/security-freeze.toml"
 security_target_config="$test_dir/security-target.toml"
 security_target_metadata_config="$test_dir/security-target-metadata.toml"
+authorization_source_config="$test_dir/authorization-source.toml"
+authorization_source_metadata_config="$test_dir/authorization-source-metadata.toml"
+authorization_freeze_config="$test_dir/authorization-freeze.toml"
 wrong_hostname_config="$test_dir/wrong-hostname.toml"
 untrusted_ca_config="$test_dir/untrusted-ca.toml"
 missing_client_config="$test_dir/missing-client.toml"
@@ -548,6 +592,28 @@ write_config "$security_source_metadata_config" "$port" migration_security_sourc
 write_config "$security_freeze_config" "$port" migration_security_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
 write_config "$security_target_config" "$target_port" migration_security_target migration_execution_target SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
 write_config "$security_target_metadata_config" "$target_port" migration_security_target execution_target_metadata_admin SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD root
+write_config "$authorization_source_config" "$port" migration_authorization_source migration_execution_source SQL_SPLITTER_MYSQL_EXECUTION_SOURCE_PASSWORD
+write_config "$authorization_source_metadata_config" "$port" migration_authorization_source source_metadata_admin SQL_SPLITTER_MYSQL_SOURCE_METADATA_PASSWORD root
+write_config "$authorization_freeze_config" "$port" migration_authorization_source migration_admin SQL_SPLITTER_MYSQL_ADMIN_PASSWORD
+for authorization_case in prepared partial applied committed; do
+  write_config \
+    "$test_dir/authorization-${authorization_case}-target.toml" \
+    "$target_port" \
+    "migration_authorization_target_${authorization_case}" \
+    migration_execution_target \
+    SQL_SPLITTER_MYSQL_EXECUTION_TARGET_PASSWORD
+  write_config \
+    "$test_dir/authorization-${authorization_case}-target-metadata.toml" \
+    "$target_port" \
+    "migration_authorization_target_${authorization_case}" \
+    execution_target_metadata_admin \
+    SQL_SPLITTER_MYSQL_EXECUTION_TARGET_METADATA_PASSWORD \
+    root
+  cat > "$test_dir/authorization-${authorization_case}-mapping.json" <<EOF
+{"schema_version":1,"accounts":[{"source":{"user":"auth_global","host":"%"},"target":{"user":"mapped_global_${authorization_case}","host":"%"}},{"source":{"user":"auth_proxy","host":"%"},"target":{"user":"mapped_proxy_${authorization_case}","host":"%"}},{"source":{"user":"auth_reader","host":"%"},"target":{"user":"mapped_reader_${authorization_case}","host":"%"}},{"source":{"user":"auth_role","host":"%"},"target":{"user":"mapped_role_${authorization_case}","host":"%"}}]}
+EOF
+  chmod 0600 "$test_dir/authorization-${authorization_case}-mapping.json"
+done
 write_config "$no_client_control_config" "$port" migration_security_source tls_no_client SQL_SPLITTER_MYSQL_TLS_NO_CLIENT_PASSWORD
 awk '!/^client_identity_pkcs12 = / && !/^client_identity_password_env = /' \
   "$no_client_control_config" > "$no_client_control_config.tmp"
@@ -620,33 +686,61 @@ export SQL_SPLITTER_MYSQL_TEST_NO_CLIENT_CONTROL_CONFIG="$no_client_control_conf
 export SQL_SPLITTER_MYSQL_TEST_EXPLICIT_INSECURE_CONFIG="$explicit_insecure_config"
 export SQL_SPLITTER_MYSQL_TEST_SECURITY_ARTIFACT_DIR="$test_dir"
 export SQL_SPLITTER_MYSQL_TEST_SECURITY_JOURNAL_DIR="$journal_dir"
+export SQL_SPLITTER_MYSQL_TEST_AUTHORIZATION_SOURCE_CONFIG="$authorization_source_config"
+export SQL_SPLITTER_MYSQL_TEST_AUTHORIZATION_SOURCE_METADATA_CONFIG="$authorization_source_metadata_config"
+export SQL_SPLITTER_MYSQL_TEST_AUTHORIZATION_FREEZE_CONFIG="$authorization_freeze_config"
+export SQL_SPLITTER_MYSQL_TEST_AUTHORIZATION_ARTIFACT_DIR="$test_dir"
+export SQL_SPLITTER_MYSQL_TEST_AUTHORIZATION_JOURNAL_DIR="$journal_dir"
+export SQL_SPLITTER_MYSQL_AUTH_MAPPED_PASSWORD=mappedpass
 
-docker exec "$container" mysql -uroot -prootpass -Nse \
-  "SET PERSIST super_read_only = ON"
-docker exec "$container" mysql -uroot -prootpass -Nse \
-  "LOCK INSTANCE FOR BACKUP; SELECT SLEEP(900)" >/dev/null 2>&1 &
-lock_pid=$!
-
-backup_lock_connection_id=""
-for _ in $(seq 1 50); do
-  backup_lock_connection_id=$(docker exec "$container" mysql -uroot -prootpass -Nse \
-    "SELECT t.PROCESSLIST_ID FROM performance_schema.metadata_locks ml JOIN performance_schema.threads t ON t.THREAD_ID = ml.OWNER_THREAD_ID WHERE ml.OBJECT_TYPE = 'BACKUP LOCK' AND ml.LOCK_STATUS = 'GRANTED' LIMIT 1" 2>/dev/null || true)
-  if [ -n "$backup_lock_connection_id" ]; then
-    break
+acquire_backup_lock() {
+  docker exec "$container" mysql -uroot -prootpass -Nse \
+    "LOCK INSTANCE FOR BACKUP; SELECT SLEEP(900)" >/dev/null 2>&1 &
+  lock_pid=$!
+  backup_lock_connection_id=""
+  for _ in $(seq 1 50); do
+    backup_lock_connection_id=$(docker exec "$container" mysql -uroot -prootpass -Nse \
+      "SELECT t.PROCESSLIST_ID FROM performance_schema.metadata_locks ml JOIN performance_schema.threads t ON t.THREAD_ID = ml.OWNER_THREAD_ID WHERE ml.OBJECT_TYPE = 'BACKUP LOCK' AND ml.LOCK_STATUS = 'GRANTED' LIMIT 1" 2>/dev/null || true)
+    if [ -n "$backup_lock_connection_id" ]; then
+      break
+    fi
+    sleep 0.1
+  done
+  if [ -z "$backup_lock_connection_id" ]; then
+    echo "external MySQL backup lock did not become observable" >&2
+    exit 1
   fi
-  sleep 0.1
-done
-if [ -z "$backup_lock_connection_id" ]; then
-  echo "external MySQL backup lock did not become observable" >&2
-  exit 1
-fi
-read -r backup_lock_owner_user backup_lock_owner_host <<EOF
+  read -r backup_lock_owner_user backup_lock_owner_host <<EOF
 $(docker exec "$container" mysql -uroot -prootpass -Nse \
   "SELECT PROCESSLIST_USER, PROCESSLIST_HOST FROM performance_schema.threads WHERE PROCESSLIST_ID = $backup_lock_connection_id")
 EOF
-export SQL_SPLITTER_MYSQL_BACKUP_LOCK_CONNECTION_ID="$backup_lock_connection_id"
-export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_USER="$backup_lock_owner_user"
-export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_HOST="$backup_lock_owner_host"
+  export SQL_SPLITTER_MYSQL_BACKUP_LOCK_CONNECTION_ID="$backup_lock_connection_id"
+  export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_USER="$backup_lock_owner_user"
+  export SQL_SPLITTER_MYSQL_BACKUP_LOCK_OWNER_HOST="$backup_lock_owner_host"
+}
+
+release_backup_lock() {
+  docker exec "$container" mysql -uroot -prootpass -Nse \
+    "KILL CONNECTION $backup_lock_connection_id" >/dev/null
+  wait "$lock_pid" 2>/dev/null || true
+  lock_pid=""
+  for _ in $(seq 1 50); do
+    lock_owner_exists=$(docker exec "$container" mysql -uroot -prootpass -Nse \
+      "SELECT COUNT(*) FROM performance_schema.threads WHERE PROCESSLIST_ID = $backup_lock_connection_id" 2>/dev/null || true)
+    if [ "$lock_owner_exists" = "0" ]; then
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$lock_owner_exists" != "0" ]; then
+    echo "external MySQL backup-lock owner did not terminate" >&2
+    exit 1
+  fi
+}
+
+docker exec "$container" mysql -uroot -prootpass -Nse \
+  "SET PERSIST super_read_only = ON"
+acquire_backup_lock
 
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_external_freeze_attestation \
@@ -688,25 +782,34 @@ cargo test --no-default-features --features enterprise-migration-spike,migration
   --test migration_mysql_plan_test live_mysql_drift_rejection_matrix \
   -- --ignored --exact --nocapture
 
+# Business grants are installed only after the other source-database matrices
+# finish, so their server-wide metadata captures remain free of this fixture.
+release_backup_lock
+docker exec "$container" mysql -uroot -prootpass -Nse \
+  "SET PERSIST super_read_only = OFF"
+docker exec -i "$container" mysql -uroot -prootpass <<'SQL'
+GRANT SELECT ON migration_authorization_source.* TO 'auth_reader'@'%' WITH GRANT OPTION;
+GRANT UPDATE (payload) ON migration_authorization_source.authorization_items TO 'auth_reader'@'%';
+GRANT DELETE ON migration_authorization_source.authorization_items TO 'auth_role'@'%';
+GRANT 'auth_role'@'%' TO 'auth_reader'@'%' WITH ADMIN OPTION;
+SET DEFAULT ROLE 'auth_role'@'%' TO 'auth_reader'@'%';
+GRANT CONNECTION_ADMIN ON *.* TO 'auth_reader'@'%';
+GRANT SELECT ON *.* TO 'auth_global'@'%';
+REVOKE SELECT ON migration_authorization_source.* FROM 'auth_global'@'%';
+GRANT PROXY ON 'auth_reader'@'%' TO 'auth_proxy'@'%' WITH GRANT OPTION;
+SQL
+docker exec "$container" mysql -uroot -prootpass -Nse \
+  "SET PERSIST super_read_only = ON"
+acquire_backup_lock
+
+cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
+  --test migration_mysql_plan_test live_mysql_authorization_restoration_recovery_matrix \
+  -- --ignored --exact --nocapture
+
 # The disposable container root owns this backup-lock connection. Terminate it
 # here, then prove that execution stops before journal creation. This must
 # remain last.
-docker exec "$container" mysql -uroot -prootpass -Nse \
-  "KILL CONNECTION $backup_lock_connection_id" >/dev/null
-wait "$lock_pid" 2>/dev/null || true
-lock_pid=""
-for _ in $(seq 1 50); do
-  lock_owner_exists=$(docker exec "$container" mysql -uroot -prootpass -Nse \
-    "SELECT COUNT(*) FROM performance_schema.threads WHERE PROCESSLIST_ID = $backup_lock_connection_id" 2>/dev/null || true)
-  if [ "$lock_owner_exists" = "0" ]; then
-    break
-  fi
-  sleep 0.1
-done
-if [ "$lock_owner_exists" != "0" ]; then
-  echo "external MySQL backup-lock owner did not terminate" >&2
-  exit 1
-fi
+release_backup_lock
 cargo test --no-default-features --features enterprise-migration-spike,migration-fault-injection \
   --test migration_mysql_plan_test live_mysql_freeze_loss_stops_before_journal \
   -- --ignored --exact --nocapture
