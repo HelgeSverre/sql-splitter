@@ -90,6 +90,11 @@ pub(crate) fn decode_numeric(
     let scale = usize::try_from(expected_scale).map_err(|_| invalid_binary("numeric"))?;
     if !scale.is_multiple_of(4) {
         let remove = 4 - scale % 4;
+        let discarded_divisor =
+            10_u16.pow(u32::try_from(remove).map_err(|_| invalid_binary("numeric"))?);
+        if digit_at(lowest_retained_position) % discarded_divisor != 0 {
+            return Err(invalid_binary("numeric"));
+        }
         decimal_digits.truncate(
             decimal_digits
                 .len()
@@ -558,6 +563,11 @@ mod tests {
         assert!(encode_numeric(b"-0", 0).is_err());
         assert!(encode_numeric(b"01", 0).is_err());
         assert!(encode_numeric(b"1", 31).is_err());
+        let nonzero_subscale_digits = [0, 2, 0, 0, 0, 0, 0, 2, 0, 123, 0x11, 0xf7];
+        assert!(matches!(
+            decode_numeric(&nonzero_subscale_digits, 5, 2),
+            Err(PostgresCodecError::InvalidBinary { .. })
+        ));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use super::mysql_visibility::{
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 15;
+pub const PLAN_SCHEMA_VERSION: u16 = 16;
 pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
     MigrationConversionPolicy::same_dialect_exact(ConversionDialect::MySql);
 pub const POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
@@ -469,155 +469,8 @@ impl MigrationPlan {
                 &self.consistency_mode,
             )?;
         }
-        match (
-            source_catalog.dialect.as_str(),
-            &self.mysql_snapshot_evidence,
-        ) {
-            ("mysql", Some(evidence)) => {
-                self.mysql_source_profile
-                    .as_ref()
-                    .ok_or(PlanError::MissingEvidence {
-                        field: "mysql_source_profile",
-                    })?
-                    .validate()?;
-                let catalog_reader_fingerprint = self
-                    .mysql_metadata_visibility
-                    .as_ref()
-                    .map_or(self.source_catalog_fingerprint.as_str(), |visibility| {
-                        visibility.catalog_reader_fingerprint.as_str()
-                    });
-                validate_mysql_snapshot_evidence(
-                    evidence,
-                    &self.source_endpoint_identity,
-                    source_catalog,
-                    catalog_reader_fingerprint,
-                )?;
-                if let Some(visibility) = &self.mysql_metadata_visibility {
-                    visibility.validate()?;
-                    if visibility.endpoint_identity != self.source_endpoint_identity
-                        || visibility.database_identity != evidence.database_identity
-                        || visibility.server_uuid != evidence.server_uuid
-                        || visibility.catalog_reader_tls_binding != self.source_tls_binding
-                        || format!(
-                            "{}@{}",
-                            visibility.catalog_reader_account.user,
-                            visibility.catalog_reader_account.host
-                        ) != evidence.authenticated_account
-                        || visibility.catalog_reader_fingerprint != evidence.catalog_fingerprint
-                        || visibility.authoritative_catalog_fingerprint
-                            != self.source_catalog_fingerprint
-                    {
-                        return Err(PlanError::InvalidMySqlMetadataVisibility);
-                    }
-                    validate_mysql_authorization_contract(
-                        visibility,
-                        self.mysql_target_metadata_visibility.as_ref(),
-                        self.mysql_authorization.as_ref(),
-                        &self.unsupported_objects,
-                    )?;
-                } else if !self
-                    .unsupported_objects
-                    .objects
-                    .iter()
-                    .any(|finding| finding.object_kind == "catalog_visibility")
-                {
-                    return Err(PlanError::MissingEvidence {
-                        field: "mysql_metadata_visibility",
-                    });
-                }
-                if self.postgres_source_profile.is_some() {
-                    return Err(PlanError::InvalidMySqlSnapshotEvidence);
-                }
-                let target_evidence = self.mysql_target_snapshot_evidence.as_ref().ok_or(
-                    PlanError::MissingEvidence {
-                        field: "mysql_target_snapshot_evidence",
-                    },
-                )?;
-                let target_reader_catalog_fingerprint =
-                    self.mysql_target_metadata_visibility.as_ref().map_or_else(
-                        || {
-                            self.target_catalog_fingerprint
-                                .as_assessed()
-                                .map(String::as_str)
-                                .unwrap_or_default()
-                        },
-                        |visibility| visibility.catalog_reader_fingerprint.as_str(),
-                    );
-                validate_mysql_snapshot_evidence(
-                    target_evidence,
-                    self.target_endpoint_identity
-                        .as_assessed()
-                        .ok_or(PlanError::InvalidMySqlSnapshotEvidence)?,
-                    self.target_catalog
-                        .as_assessed()
-                        .ok_or(PlanError::InvalidMySqlSnapshotEvidence)?,
-                    target_reader_catalog_fingerprint,
-                )?;
-                if let Some(visibility) = &self.mysql_target_metadata_visibility {
-                    visibility.validate()?;
-                    if visibility.endpoint_identity
-                        != *self
-                            .target_endpoint_identity
-                            .as_assessed()
-                            .ok_or(PlanError::InvalidMySqlMetadataVisibility)?
-                        || visibility.database_identity != target_evidence.database_identity
-                        || visibility.server_uuid != target_evidence.server_uuid
-                        || visibility.catalog_reader_tls_binding
-                            != *self
-                                .target_tls_binding
-                                .as_assessed()
-                                .ok_or(PlanError::InvalidMySqlMetadataVisibility)?
-                        || format!(
-                            "{}@{}",
-                            visibility.catalog_reader_account.user,
-                            visibility.catalog_reader_account.host
-                        ) != target_evidence.authenticated_account
-                        || visibility.catalog_reader_fingerprint
-                            != target_evidence.catalog_fingerprint
-                        || visibility.authoritative_catalog_fingerprint
-                            != *self
-                                .target_catalog_fingerprint
-                                .as_assessed()
-                                .ok_or(PlanError::InvalidMySqlMetadataVisibility)?
-                    {
-                        return Err(PlanError::InvalidMySqlMetadataVisibility);
-                    }
-                } else if !self
-                    .unsupported_objects
-                    .objects
-                    .iter()
-                    .any(|finding| finding.object_kind == "target_catalog_visibility")
-                {
-                    return Err(PlanError::MissingEvidence {
-                        field: "mysql_target_metadata_visibility",
-                    });
-                }
-                if evidence.lower_case_table_names != target_evidence.lower_case_table_names
-                    || self.consistency_mode != "mysql-repeatable-read-consistent-snapshot"
-                    || self.conversion_policy != MYSQL_SAME_DIALECT_CONVERSION_POLICY
-                {
-                    return Err(PlanError::InvalidMySqlSnapshotEvidence);
-                }
-            }
-            ("mysql", None) => {
-                return Err(PlanError::MissingEvidence {
-                    field: "mysql_snapshot_evidence",
-                });
-            }
-            (_, Some(_)) => return Err(PlanError::UnexpectedMySqlSnapshotEvidence),
-            (_, None) if self.mysql_target_snapshot_evidence.is_some() => {
-                return Err(PlanError::UnexpectedMySqlSnapshotEvidence);
-            }
-            (_, None) => {}
-        }
-        if source_catalog.dialect != "mysql"
-            && (self.mysql_source_profile.is_some()
-                || self.mysql_metadata_visibility.is_some()
-                || self.mysql_target_metadata_visibility.is_some()
-                || self.mysql_authorization.is_some())
-        {
-            return Err(PlanError::UnexpectedMySqlSnapshotEvidence);
-        }
+        validate_mysql_source_contract(self, source_catalog)?;
+        validate_mysql_target_contract(self)?;
         let mut finding_keys = BTreeSet::new();
         for finding in &self.unsupported_objects.objects {
             if finding.object_id.is_empty()
@@ -705,27 +558,62 @@ impl MigrationPlan {
 }
 
 fn validate_operation_conversion_bindings(plan: &MigrationPlan) -> Result<(), PlanError> {
+    const COPY_POLICY: &str = "table_conversion_policy";
+    const CREATE_POLICY: &str = "cross_dialect_target_table_policy";
+    const VERIFY_POLICY: &str = "cross_dialect_verification_policy";
     let MigrationConversionMode::CrossDialect { tables, .. } = &plan.conversion_policy.mode else {
-        if plan
-            .operations
-            .iter()
-            .any(|operation| operation.parameters.contains_key("table_conversion_policy"))
-        {
+        if plan.operations.iter().any(|operation| {
+            [COPY_POLICY, CREATE_POLICY, VERIFY_POLICY]
+                .iter()
+                .any(|parameter| operation.parameters.contains_key(*parameter))
+        }) {
             return Err(PlanError::InvalidConversionPolicy);
         }
         return Ok(());
     };
-    let expected = tables
+    let expected_source = tables
         .iter()
         .map(|table| (&table.source_table, table))
         .collect::<BTreeMap<_, _>>();
-    let mut observed = BTreeSet::new();
+    let expected_target = tables
+        .iter()
+        .map(|table| (&table.target_table, table))
+        .collect::<BTreeMap<_, _>>();
+    if tables.is_empty() {
+        return if plan.operations.is_empty() {
+            Ok(())
+        } else {
+            Err(PlanError::InvalidConversionPolicy)
+        };
+    }
+    let mut observed_copy = BTreeMap::new();
+    let mut observed_create = BTreeMap::new();
+    let mut observed_verify = BTreeMap::new();
     for operation in &plan.operations {
-        if operation.kind != OperationKind::CopyTable {
-            if operation.parameters.contains_key("table_conversion_policy") {
-                return Err(PlanError::InvalidConversionPolicy);
+        let (parameter, expected, observed) = match operation.kind {
+            OperationKind::CopyTable => (COPY_POLICY, &expected_source, &mut observed_copy),
+            OperationKind::CreateTable => (CREATE_POLICY, &expected_target, &mut observed_create),
+            OperationKind::VerifyTable => (VERIFY_POLICY, &expected_source, &mut observed_verify),
+            _ => {
+                if [COPY_POLICY, CREATE_POLICY, VERIFY_POLICY]
+                    .iter()
+                    .any(|parameter| operation.parameters.contains_key(*parameter))
+                {
+                    return Err(PlanError::InvalidConversionPolicy);
+                }
+                continue;
             }
-            continue;
+        };
+        if [COPY_POLICY, CREATE_POLICY, VERIFY_POLICY]
+            .iter()
+            .any(|candidate| {
+                *candidate != parameter && operation.parameters.contains_key(*candidate)
+            })
+        {
+            return Err(PlanError::InvalidConversionPolicy);
+        }
+        if operation.parameters.len() != 1 {
+            return Err(PlanError::InvalidConversionPolicy);
         }
         let table = operation
             .table
@@ -736,18 +624,244 @@ fn validate_operation_conversion_bindings(plan: &MigrationPlan) -> Result<(), Pl
             .ok_or(PlanError::InvalidConversionPolicy)?;
         let embedded = operation
             .parameters
-            .get("table_conversion_policy")
+            .get(parameter)
             .cloned()
             .map(serde_json::from_value::<super::conversion::TableConversionPolicy>)
             .transpose()
             .map_err(|_| PlanError::InvalidConversionPolicy)?
             .ok_or(PlanError::InvalidConversionPolicy)?;
-        if &embedded != *reviewed || !observed.insert(table) {
+        if &embedded != *reviewed || observed.insert(table, operation).is_some() {
             return Err(PlanError::InvalidConversionPolicy);
         }
     }
-    if observed.len() != expected.len() {
+    if observed_copy.len() != expected_source.len()
+        || observed_create.len() != expected_target.len()
+        || observed_verify.len() != expected_source.len()
+    {
         return Err(PlanError::InvalidConversionPolicy);
+    }
+    for policy in tables {
+        let create = observed_create
+            .get(&policy.target_table)
+            .ok_or(PlanError::InvalidConversionPolicy)?;
+        let copy = observed_copy
+            .get(&policy.source_table)
+            .ok_or(PlanError::InvalidConversionPolicy)?;
+        let verify = observed_verify
+            .get(&policy.source_table)
+            .ok_or(PlanError::InvalidConversionPolicy)?;
+        if !create.dependencies.is_empty()
+            || copy.dependencies.as_slice() != std::slice::from_ref(&create.id)
+            || verify.dependencies.as_slice() != std::slice::from_ref(&copy.id)
+        {
+            return Err(PlanError::InvalidConversionPolicy);
+        }
+    }
+    let mut schema_verifiers = plan
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == OperationKind::VerifySchema);
+    let schema_verifier = schema_verifiers
+        .next()
+        .ok_or(PlanError::InvalidConversionPolicy)?;
+    let mut expected_schema_dependencies = plan
+        .operations
+        .iter()
+        .filter(|operation| operation.kind != OperationKind::VerifySchema)
+        .map(|operation| operation.id.clone())
+        .collect::<Vec<_>>();
+    expected_schema_dependencies.sort();
+    if schema_verifiers.next().is_some()
+        || schema_verifier.table.is_some()
+        || !schema_verifier.parameters.is_empty()
+        || schema_verifier.dependencies != expected_schema_dependencies
+        || plan.operations.iter().any(|operation| {
+            !matches!(
+                operation.kind,
+                OperationKind::CreateTable
+                    | OperationKind::CopyTable
+                    | OperationKind::VerifyTable
+                    | OperationKind::VerifySchema
+            )
+        })
+    {
+        return Err(PlanError::InvalidConversionPolicy);
+    }
+    Ok(())
+}
+
+fn validate_mysql_source_contract(
+    plan: &MigrationPlan,
+    source_catalog: &VendorCatalog,
+) -> Result<(), PlanError> {
+    if source_catalog.dialect != "mysql" {
+        if plan.mysql_snapshot_evidence.is_some()
+            || plan.mysql_source_profile.is_some()
+            || plan.mysql_metadata_visibility.is_some()
+            || plan.mysql_authorization.is_some()
+        {
+            return Err(PlanError::UnexpectedMySqlSnapshotEvidence);
+        }
+        return Ok(());
+    }
+
+    let evidence = plan
+        .mysql_snapshot_evidence
+        .as_ref()
+        .ok_or(PlanError::MissingEvidence {
+            field: "mysql_snapshot_evidence",
+        })?;
+    plan.mysql_source_profile
+        .as_ref()
+        .ok_or(PlanError::MissingEvidence {
+            field: "mysql_source_profile",
+        })?
+        .validate()?;
+    if plan.postgres_source_profile.is_some()
+        || plan.consistency_mode != "mysql-repeatable-read-consistent-snapshot"
+    {
+        return Err(PlanError::InvalidMySqlSnapshotEvidence);
+    }
+    let catalog_reader_fingerprint = plan
+        .mysql_metadata_visibility
+        .as_ref()
+        .map_or(plan.source_catalog_fingerprint.as_str(), |visibility| {
+            visibility.catalog_reader_fingerprint.as_str()
+        });
+    validate_mysql_snapshot_evidence(
+        evidence,
+        &plan.source_endpoint_identity,
+        source_catalog,
+        catalog_reader_fingerprint,
+    )?;
+    if let Some(visibility) = &plan.mysql_metadata_visibility {
+        visibility.validate()?;
+        if visibility.endpoint_identity != plan.source_endpoint_identity
+            || visibility.database_identity != evidence.database_identity
+            || visibility.server_uuid != evidence.server_uuid
+            || visibility.catalog_reader_tls_binding != plan.source_tls_binding
+            || format!(
+                "{}@{}",
+                visibility.catalog_reader_account.user, visibility.catalog_reader_account.host
+            ) != evidence.authenticated_account
+            || visibility.catalog_reader_fingerprint != evidence.catalog_fingerprint
+            || visibility.authoritative_catalog_fingerprint != plan.source_catalog_fingerprint
+        {
+            return Err(PlanError::InvalidMySqlMetadataVisibility);
+        }
+        validate_mysql_authorization_contract(
+            visibility,
+            plan.mysql_target_metadata_visibility.as_ref(),
+            plan.mysql_authorization.as_ref(),
+            &plan.unsupported_objects,
+        )?;
+    } else if !plan
+        .unsupported_objects
+        .objects
+        .iter()
+        .any(|finding| finding.object_kind == "catalog_visibility")
+    {
+        return Err(PlanError::MissingEvidence {
+            field: "mysql_metadata_visibility",
+        });
+    } else if plan.mysql_authorization.is_some() {
+        return Err(PlanError::InvalidMySqlMetadataVisibility);
+    }
+    Ok(())
+}
+
+fn validate_mysql_target_contract(plan: &MigrationPlan) -> Result<(), PlanError> {
+    let target_catalog = plan.target_catalog.as_assessed();
+    if target_catalog.is_none_or(|catalog| catalog.dialect != "mysql") {
+        if plan.mysql_target_snapshot_evidence.is_some()
+            || plan.mysql_target_metadata_visibility.is_some()
+        {
+            return Err(PlanError::UnexpectedMySqlSnapshotEvidence);
+        }
+        if plan
+            .source_catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.dialect == "mysql")
+            && plan.mysql_authorization.is_some()
+        {
+            return Err(PlanError::InvalidMySqlMetadataVisibility);
+        }
+        return Ok(());
+    }
+
+    let target_catalog = target_catalog.ok_or(PlanError::InvalidMySqlSnapshotEvidence)?;
+    let target_evidence =
+        plan.mysql_target_snapshot_evidence
+            .as_ref()
+            .ok_or(PlanError::MissingEvidence {
+                field: "mysql_target_snapshot_evidence",
+            })?;
+    let target_reader_catalog_fingerprint =
+        plan.mysql_target_metadata_visibility.as_ref().map_or_else(
+            || {
+                plan.target_catalog_fingerprint
+                    .as_assessed()
+                    .map(String::as_str)
+                    .unwrap_or_default()
+            },
+            |visibility| visibility.catalog_reader_fingerprint.as_str(),
+        );
+    validate_mysql_snapshot_evidence(
+        target_evidence,
+        plan.target_endpoint_identity
+            .as_assessed()
+            .ok_or(PlanError::InvalidMySqlSnapshotEvidence)?,
+        target_catalog,
+        target_reader_catalog_fingerprint,
+    )?;
+    if let Some(visibility) = &plan.mysql_target_metadata_visibility {
+        visibility.validate()?;
+        if visibility.endpoint_identity
+            != *plan
+                .target_endpoint_identity
+                .as_assessed()
+                .ok_or(PlanError::InvalidMySqlMetadataVisibility)?
+            || visibility.database_identity != target_evidence.database_identity
+            || visibility.server_uuid != target_evidence.server_uuid
+            || visibility.catalog_reader_tls_binding
+                != *plan
+                    .target_tls_binding
+                    .as_assessed()
+                    .ok_or(PlanError::InvalidMySqlMetadataVisibility)?
+            || format!(
+                "{}@{}",
+                visibility.catalog_reader_account.user, visibility.catalog_reader_account.host
+            ) != target_evidence.authenticated_account
+            || visibility.catalog_reader_fingerprint != target_evidence.catalog_fingerprint
+            || visibility.authoritative_catalog_fingerprint
+                != *plan
+                    .target_catalog_fingerprint
+                    .as_assessed()
+                    .ok_or(PlanError::InvalidMySqlMetadataVisibility)?
+        {
+            return Err(PlanError::InvalidMySqlMetadataVisibility);
+        }
+    } else if !plan
+        .unsupported_objects
+        .objects
+        .iter()
+        .any(|finding| finding.object_kind == "target_catalog_visibility")
+    {
+        return Err(PlanError::MissingEvidence {
+            field: "mysql_target_metadata_visibility",
+        });
+    }
+
+    if let Some(source_evidence) = &plan.mysql_snapshot_evidence {
+        if source_evidence.lower_case_table_names != target_evidence.lower_case_table_names
+            || plan.conversion_policy != MYSQL_SAME_DIALECT_CONVERSION_POLICY
+        {
+            return Err(PlanError::InvalidMySqlSnapshotEvidence);
+        }
+    } else if !plan.conversion_policy.has_approved_transformations()
+        || plan.mysql_authorization.is_some()
+    {
+        return Err(PlanError::InvalidMySqlSnapshotEvidence);
     }
     Ok(())
 }
@@ -1072,6 +1186,49 @@ mod tests {
             unsupported_objects: UnsupportedObjectReport::default(),
         }
     }
+
+    fn bind_unproven_mysql_target(plan: &mut MigrationPlan) {
+        let target_catalog = match &mut plan.target_catalog {
+            AssessmentStatus::Assessed(target) => target,
+            AssessmentStatus::NotAssessed => unreachable!(),
+        };
+        target_catalog.dialect = "mysql".into();
+        target_catalog.server_version = "8.4.0".into();
+        target_catalog
+            .vendor_metadata
+            .insert("lower_case_table_names".into(), "0".into());
+        let target_fingerprint = fingerprint(target_catalog);
+        plan.target_catalog_fingerprint = AssessmentStatus::Assessed(target_fingerprint.clone());
+        plan.mysql_target_snapshot_evidence = Some(MySqlSnapshotEvidence {
+            endpoint_identity: plan.target_endpoint_identity.as_assessed().unwrap().clone(),
+            database_identity: target_catalog.database.to_string(),
+            server_uuid: "target-server-uuid".into(),
+            server_version: target_catalog.server_version.clone(),
+            authenticated_account: "target@%".into(),
+            lifecycle_id: "mysql-target-session-1".into(),
+            connection_id: 8,
+            transaction_isolation: "REPEATABLE-READ".into(),
+            transaction_read_only: true,
+            session_time_zone: "+00:00".into(),
+            catalog_snapshot_protected: false,
+            information_schema_stats_expiry: 0,
+            lower_case_table_names: 0,
+            session_sql_mode: MYSQL_STRICT_SQL_MODE.into(),
+            character_set_client: MYSQL_SESSION_CHARACTER_SET.into(),
+            character_set_connection: MYSQL_SESSION_CHARACTER_SET.into(),
+            character_set_results: MYSQL_SESSION_CHARACTER_SET.into(),
+            collation_connection: MYSQL_SESSION_COLLATION.into(),
+            gtid_executed_observation: String::new(),
+            catalog_fingerprint: target_fingerprint,
+        });
+        plan.unsupported_objects.objects.push(UnsupportedObject {
+            code: UnsupportedObjectCode::MySqlCatalogSemantics,
+            object_id: "mysql-target-catalog-visibility".into(),
+            object_kind: "target_catalog_visibility".into(),
+            reason: "target metadata visibility is not proven in this fixture".into(),
+            required_semantics: true,
+        });
+    }
     #[test]
     fn hash_is_deterministic_and_tamper_evident() {
         let reviewed = ReviewedPlan::new(plan()).unwrap();
@@ -1098,13 +1255,7 @@ mod tests {
     #[test]
     fn cross_dialect_plan_binds_both_catalog_dialects() {
         let mut plan = plan();
-        let target = match &mut plan.target_catalog {
-            AssessmentStatus::Assessed(target) => target,
-            AssessmentStatus::NotAssessed => unreachable!(),
-        };
-        target.dialect = "mysql".into();
-        target.server_version = "8.4.0".into();
-        plan.target_catalog_fingerprint = AssessmentStatus::Assessed(fingerprint(target));
+        bind_unproven_mysql_target(&mut plan);
         plan.conversion_policy = MigrationConversionPolicy::cross_dialect(
             ConversionDialect::PostgreSql,
             ConversionDialect::MySql,
@@ -1123,13 +1274,7 @@ mod tests {
     #[test]
     fn cross_dialect_copy_operation_binds_its_exact_table_policy() {
         let mut plan = plan();
-        let target_catalog = match &mut plan.target_catalog {
-            AssessmentStatus::Assessed(target) => target,
-            AssessmentStatus::NotAssessed => unreachable!(),
-        };
-        target_catalog.dialect = "mysql".into();
-        target_catalog.server_version = "8.4.0".into();
-        plan.target_catalog_fingerprint = AssessmentStatus::Assessed(fingerprint(target_catalog));
+        bind_unproven_mysql_target(&mut plan);
         let source_table = QualifiedTable {
             namespace: Identifier::new("public").unwrap(),
             name: Identifier::new("items").unwrap(),
@@ -1157,7 +1302,7 @@ mod tests {
             .unwrap();
         let table_policy = TableConversionPolicy {
             source_table: source_table.clone(),
-            target_table,
+            target_table: target_table.clone(),
             target_contract: super::super::conversion::CrossDialectTargetTableContract::MySql {
                 engine: super::super::conversion::MySqlTargetEngine::InnoDb,
                 character_set: Identifier::new("utf8mb4").unwrap(),
@@ -1194,17 +1339,44 @@ mod tests {
             vec![table_policy.clone()],
         )
         .unwrap();
+        let create = PlanOperation::new(
+            OperationKind::CreateTable,
+            Some(target_table),
+            Vec::new(),
+            BTreeMap::from([(
+                "cross_dialect_target_table_policy".into(),
+                serde_json::to_value(&table_policy).unwrap(),
+            )]),
+        )
+        .unwrap();
         let copy = PlanOperation::new(
             OperationKind::CopyTable,
             Some(source_table.clone()),
-            Vec::new(),
+            vec![create.id.clone()],
             BTreeMap::from([(
                 "table_conversion_policy".into(),
                 serde_json::to_value(&table_policy).unwrap(),
             )]),
         )
         .unwrap();
-        plan.operations = vec![copy];
+        let verify = PlanOperation::new(
+            OperationKind::VerifyTable,
+            Some(source_table.clone()),
+            vec![copy.id.clone()],
+            BTreeMap::from([(
+                "cross_dialect_verification_policy".into(),
+                serde_json::to_value(&table_policy).unwrap(),
+            )]),
+        )
+        .unwrap();
+        let verify_schema = PlanOperation::new(
+            OperationKind::VerifySchema,
+            None,
+            vec![create.id.clone(), copy.id.clone(), verify.id.clone()],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        plan.operations = vec![create, copy, verify, verify_schema];
         assert!(plan.validate().is_ok());
 
         plan.operations = vec![PlanOperation::new(

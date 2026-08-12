@@ -1407,35 +1407,8 @@ fn build_plan_with_visibility_internal(
     target_visibility: &MySqlMetadataVisibilityCapture,
     mapping: Option<MySqlAuthorizationMapping>,
 ) -> Result<ReviewedPlan, MySqlPlanError> {
-    validate_catalog_snapshot(source)?;
-    validate_catalog_snapshot(target)?;
-    source_visibility.evidence.validate()?;
-    target_visibility.evidence.validate()?;
-    if !mysql_catalog_visibility_is_complete(source, source_visibility)?
-        || !mysql_catalog_visibility_is_complete(target, target_visibility)?
-        || source_visibility.evidence.endpoint_identity != source.endpoint_identity
-        || source_visibility.evidence.database_identity != source.database_identity
-        || source_visibility.evidence.server_uuid != source.snapshot_evidence.server_uuid
-        || source_visibility.evidence.catalog_reader_tls_binding != source.tls_binding
-        || source_visibility.evidence.catalog_reader_fingerprint
-            != source.snapshot_evidence.catalog_fingerprint
-        || source_visibility.evidence.authoritative_catalog_fingerprint
-            != mysql_catalog_fingerprint(&source_visibility.authoritative_catalog)
-                .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?
-        || target_visibility.evidence.endpoint_identity != target.endpoint_identity
-        || target_visibility.evidence.database_identity != target.database_identity
-        || target_visibility.evidence.server_uuid != target.snapshot_evidence.server_uuid
-        || target_visibility.evidence.catalog_reader_tls_binding != target.tls_binding
-        || target_visibility.evidence.catalog_reader_fingerprint
-            != target.snapshot_evidence.catalog_fingerprint
-        || target_visibility.evidence.authoritative_catalog_fingerprint
-            != mysql_catalog_fingerprint(&target_visibility.authoritative_catalog)
-                .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?
-    {
-        return Err(MySqlPlanError::InvalidCatalog(
-            "MySQL metadata-visibility capture differs from its reader snapshot".into(),
-        ));
-    }
+    validate_metadata_visibility_capture(source, source_visibility)?;
+    validate_metadata_visibility_capture(target, target_visibility)?;
     let mut execution_source = source.clone();
     execution_source.catalog = source_visibility.authoritative_catalog.clone();
     execution_source.blockers = source_visibility.authoritative_blockers.clone();
@@ -1855,7 +1828,9 @@ fn table_has_ddl_blocker(
     })
 }
 
-fn validate_catalog_snapshot(snapshot: &MySqlCatalogSnapshot) -> Result<(), MySqlPlanError> {
+pub(crate) fn validate_catalog_snapshot(
+    snapshot: &MySqlCatalogSnapshot,
+) -> Result<(), MySqlPlanError> {
     let fingerprint = mysql_catalog_fingerprint(&snapshot.catalog)
         .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?;
     let evidence = &snapshot.snapshot_evidence;
@@ -1909,6 +1884,30 @@ fn validate_catalog_snapshot(snapshot: &MySqlCatalogSnapshot) -> Result<(), MySq
                 "MySQL catalog object {object_id} lacks required {object_kind} blocker"
             )));
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_metadata_visibility_capture(
+    snapshot: &MySqlCatalogSnapshot,
+    capture: &MySqlMetadataVisibilityCapture,
+) -> Result<(), MySqlPlanError> {
+    validate_catalog_snapshot(snapshot)?;
+    capture.evidence.validate()?;
+    let authoritative_fingerprint = mysql_catalog_fingerprint(&capture.authoritative_catalog)
+        .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?;
+    if !mysql_catalog_visibility_is_complete(snapshot, capture)?
+        || capture.evidence.endpoint_identity != snapshot.endpoint_identity
+        || capture.evidence.database_identity != snapshot.database_identity
+        || capture.evidence.server_uuid != snapshot.snapshot_evidence.server_uuid
+        || capture.evidence.catalog_reader_tls_binding != snapshot.tls_binding
+        || capture.evidence.catalog_reader_fingerprint
+            != snapshot.snapshot_evidence.catalog_fingerprint
+        || capture.evidence.authoritative_catalog_fingerprint != authoritative_fingerprint
+    {
+        return Err(MySqlPlanError::InvalidCatalog(
+            "MySQL metadata-visibility capture differs from its reader snapshot".into(),
+        ));
     }
     Ok(())
 }

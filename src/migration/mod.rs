@@ -10,6 +10,7 @@ pub mod assessment;
 pub mod canonical;
 pub mod connection;
 pub mod conversion;
+pub mod cross_dialect;
 pub mod fixture;
 pub mod journal;
 pub mod model;

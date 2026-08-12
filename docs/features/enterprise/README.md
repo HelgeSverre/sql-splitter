@@ -91,7 +91,7 @@ This plan distinguishes three products:
 
 ## Document index
 
-This directory contains 19 documents:
+This directory contains 20 documents:
 
 | Document                                            | Purpose                                                               |
 | --------------------------------------------------- | --------------------------------------------------------------------- |
@@ -111,6 +111,7 @@ This directory contains 19 documents:
 | [14](./14-managed-source-profiles.md)               | Fence privilege probes, managed profiles, quiesce evidence            |
 | [15](./15-assessment-product.md)                    | Standalone read-only assessment product and report                    |
 | [16](./16-round-4-review-findings.md)               | Round-4 resolution ledger                                             |
+| [17](./17-cross-dialect-type-mapping.md)            | Phase 7 PostgreSQL↔MySQL scalar type mapping contract                 |
 | [Competitive landscape](./competitive-landscape.md) | Tool categories and scoped positioning                                |
 | [Observability](./observability-and-operations.md)  | Metrics, logs, alerts, and operations                                 |
 | This README                                         | Scope and navigation                                                  |

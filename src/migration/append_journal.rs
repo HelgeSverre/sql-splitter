@@ -1910,8 +1910,10 @@ mod tests {
         THROUGHPUT_PROFILE_SCHEMA_VERSION,
     };
     use crate::migration::plan::{
-        AssessmentStatus, MigrationPlan, OperationKind, PlanOperation, PlanPurpose, ReviewedPlan,
-        UnsupportedObjectReport, PLAN_SCHEMA_VERSION, POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
+        AssessmentStatus, MigrationPlan, MySqlSnapshotEvidence, OperationKind, PlanOperation,
+        PlanPurpose, ReviewedPlan, UnsupportedObject, UnsupportedObjectCode,
+        UnsupportedObjectReport, MYSQL_SESSION_CHARACTER_SET, MYSQL_SESSION_COLLATION,
+        MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION, POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
     };
     use crate::migration::postgres_profile::{
         PostgresExternalQuiesceAttestation, PostgresExternalQuiesceRescanTableEvidence,
@@ -2891,9 +2893,41 @@ mod tests {
         };
         target_catalog.dialect = "mysql".into();
         target_catalog.server_version = "8.4.0".into();
+        target_catalog
+            .vendor_metadata
+            .insert("lower_case_table_names".into(), "0".into());
         let target_fingerprint =
             hex::encode(Sha256::digest(serde_json::to_vec(target_catalog).unwrap()));
         plan.target_catalog_fingerprint = AssessmentStatus::Assessed(target_fingerprint.clone());
+        plan.mysql_target_snapshot_evidence = Some(MySqlSnapshotEvidence {
+            endpoint_identity: "target".into(),
+            database_identity: target_catalog.database.to_string(),
+            server_uuid: "target-server-uuid".into(),
+            server_version: target_catalog.server_version.clone(),
+            authenticated_account: "target@%".into(),
+            lifecycle_id: "target-lifecycle".into(),
+            connection_id: 7,
+            transaction_isolation: "REPEATABLE-READ".into(),
+            transaction_read_only: true,
+            session_time_zone: "+00:00".into(),
+            catalog_snapshot_protected: false,
+            information_schema_stats_expiry: 0,
+            lower_case_table_names: 0,
+            session_sql_mode: MYSQL_STRICT_SQL_MODE.into(),
+            character_set_client: MYSQL_SESSION_CHARACTER_SET.into(),
+            character_set_connection: MYSQL_SESSION_CHARACTER_SET.into(),
+            character_set_results: MYSQL_SESSION_CHARACTER_SET.into(),
+            collation_connection: MYSQL_SESSION_COLLATION.into(),
+            gtid_executed_observation: String::new(),
+            catalog_fingerprint: target_fingerprint.clone(),
+        });
+        plan.unsupported_objects.objects.push(UnsupportedObject {
+            code: UnsupportedObjectCode::MySqlCatalogSemantics,
+            object_id: "mysql-target-catalog-visibility".into(),
+            object_kind: "target_catalog_visibility".into(),
+            reason: "target metadata visibility is not proven in this fixture".into(),
+            required_semantics: true,
+        });
         plan.conversion_policy = MigrationConversionPolicy::cross_dialect(
             ConversionDialect::PostgreSql,
             ConversionDialect::MySql,

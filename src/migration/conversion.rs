@@ -13,7 +13,8 @@ use thiserror::Error;
 use super::canonical::canonicalize_json;
 use super::model::{ColumnMeta, DbValue, Identifier, QualifiedTable};
 
-pub const ROW_TYPE_CONVERSION_SCHEMA_VERSION: u16 = 2;
+pub const ROW_TYPE_CONVERSION_SCHEMA_VERSION: u16 = 3;
+pub const MYSQL_UTF8MB4_VARCHAR_MAX_CHARACTERS: u32 = 16_383;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1141,7 +1142,14 @@ impl MySqlTargetType {
         if matches!(self, Self::Decimal { precision, scale, .. } if *precision == 0 || *precision > 65 || *scale > 30 || *scale > *precision)
             || matches!(self, Self::Time { precision, .. } | Self::DateTime { precision, .. } | Self::Timestamp { precision, .. } if *precision > 6)
             || matches!(self, Self::Text { storage: MySqlTextStorage::Char { length }, .. } if *length == 0 || *length > 255)
-            || matches!(self, Self::Text { storage: MySqlTextStorage::VarChar { length }, .. } if *length == 0 || *length > 65_535)
+            || matches!(self, Self::Text {
+                storage: MySqlTextStorage::VarChar { length },
+                character_set,
+                ..
+            } if *length == 0
+                || *length > 65_535
+                || (character_set.as_str() == "utf8mb4"
+                    && *length > MYSQL_UTF8MB4_VARCHAR_MAX_CHARACTERS))
             || matches!(self, Self::Binary { storage: MySqlBinaryStorage::Binary { length } } if *length == 0 || *length > 255)
             || matches!(self, Self::Binary { storage: MySqlBinaryStorage::VarBinary { length } } if *length == 0 || *length > 65_535)
             || matches!(self, Self::Date { minimum_year, maximum_year } if minimum_year > maximum_year)
@@ -3005,6 +3013,30 @@ mod tests {
                 length: 8,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn utf8mb4_varchar_rejects_a_declared_width_that_mysql_cannot_create() {
+        let accepted = MySqlTargetType::Text {
+            storage: MySqlTextStorage::VarChar {
+                length: MYSQL_UTF8MB4_VARCHAR_MAX_CHARACTERS,
+            },
+            character_set: identifier("utf8mb4"),
+            collation: identifier("utf8mb4_0900_bin"),
+        };
+        assert!(accepted.ddl_type().is_ok());
+
+        let rejected = MySqlTargetType::Text {
+            storage: MySqlTextStorage::VarChar {
+                length: MYSQL_UTF8MB4_VARCHAR_MAX_CHARACTERS + 1,
+            },
+            character_set: identifier("utf8mb4"),
+            collation: identifier("utf8mb4_0900_bin"),
+        };
+        assert!(matches!(
+            rejected.ddl_type(),
+            Err(RowConversionError::InvalidTargetType)
         ));
     }
 
