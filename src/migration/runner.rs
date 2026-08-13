@@ -3420,34 +3420,16 @@ fn reconcile_live_prepared_chunk(
         .as_ref()
         .cloned()
         .ok_or_else(|| anyhow!("commit ambiguity has no durable prepared chunk"))?;
-    let observed_limit = chunk
-        .row_count
-        .checked_add(1)
-        .and_then(|count| u32::try_from(count).ok())
-        .ok_or_else(|| anyhow!("prepared chunk is too large to reconcile"))?;
     let mut verifier = target.open_verifier(cancellation)?;
-    let observed = verifier.select_page(&KeysetPage {
-        table: table.clone(),
-        projection: shape.projection.clone(),
-        key: shape.key.clone(),
-        after: chunk.start_key.clone().map(KeyTuple::new),
-        limit: observed_limit,
-    })?;
-    let (row_count, digest) = if observed.is_empty() {
-        (0, String::new())
-    } else {
-        let final_key = batch_final_key(&observed, shape)?;
-        let observed_count =
-            u64::try_from(observed.len()).context("observed chunk row count exceeds u64")?;
-        let exact = observed.rows() == expected.rows()
-            && observed_count == chunk.row_count
-            && final_key.0 == chunk.final_key;
-        if exact {
-            (observed_count, batch_digest(table, shape, &observed)?)
-        } else {
-            (observed_count, "different".into())
-        }
-    };
+    let (row_count, digest) = inspect_prepared_target_effect(
+        verifier.as_mut(),
+        table,
+        shape,
+        chunk.start_key.as_deref(),
+        &chunk.final_key,
+        chunk.row_count,
+        expected,
+    )?;
     let resolution = if row_count == 0 {
         PreparedResolution::RetryRequired
     } else if row_count == chunk.row_count && digest == chunk.canonical_digest {
@@ -3458,6 +3440,52 @@ fn reconcile_live_prepared_chunk(
         PreparedResolution::ManualReconciliationRequired
     };
     Ok(resolution)
+}
+
+#[cfg(feature = "enterprise-migration-spike")]
+fn inspect_prepared_target_effect(
+    verifier: &mut dyn super::connection::VerificationSession,
+    table: &QualifiedTable,
+    shape: &TableShape,
+    start_key: Option<&[DbValue]>,
+    final_key: &[DbValue],
+    row_count: u64,
+    expected: &RowBatch,
+) -> anyhow::Result<(u64, String)> {
+    let limit = u32::try_from(row_count).context("prepared chunk row count exceeds u32")?;
+    if limit == 0 {
+        return Err(anyhow!("prepared chunk row count must be positive"));
+    }
+    let observed = verifier.select_page(&KeysetPage {
+        table: table.clone(),
+        projection: shape.projection.clone(),
+        key: shape.key.clone(),
+        after: start_key.map(|key| KeyTuple::new(key.to_vec())),
+        limit,
+    })?;
+    if observed.is_empty() {
+        return Ok((0, String::new()));
+    }
+    let observed_count =
+        u64::try_from(observed.len()).context("observed chunk row count exceeds u64")?;
+    let observed_final_key = batch_final_key(&observed, shape)?;
+    let exact = observed.rows() == expected.rows()
+        && observed_count == row_count
+        && observed_final_key.0 == final_key;
+    if !exact {
+        return Ok((observed_count, "different".into()));
+    }
+    let tail = verifier.select_page(&KeysetPage {
+        table: table.clone(),
+        projection: shape.projection.clone(),
+        key: shape.key.clone(),
+        after: Some(KeyTuple::new(final_key.to_vec())),
+        limit: 1,
+    })?;
+    if !tail.is_empty() {
+        return Ok((observed_count, "different".into()));
+    }
+    Ok((observed_count, batch_digest(table, shape, &observed)?))
 }
 
 #[cfg(all(test, feature = "enterprise-migration-spike"))]
@@ -3477,26 +3505,15 @@ fn reconcile_legacy_prepared_chunk(
         .cloned()
         .ok_or_else(|| anyhow!("commit ambiguity has no durable prepared chunk"))?;
     let mut verifier = target.open_verifier(cancellation)?;
-    let observed = verifier.select_page(&KeysetPage {
-        table: table.clone(),
-        projection: shape.projection.clone(),
-        key: shape.key.clone(),
-        after: chunk.start_key.clone().map(KeyTuple::new),
-        limit: u32::try_from(
-            chunk
-                .row_count
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("row count overflow"))?,
-        )?,
-    })?;
-    let (row_count, digest) = if observed.is_empty() {
-        (0, String::new())
-    } else {
-        (
-            u64::try_from(observed.len())?,
-            batch_digest(table, shape, &observed)?,
-        )
-    };
+    let (row_count, digest) = inspect_prepared_target_effect(
+        verifier.as_mut(),
+        table,
+        shape,
+        chunk.start_key.as_deref(),
+        &chunk.final_key,
+        chunk.row_count,
+        expected,
+    )?;
     let resolution = state.reconcile_prepared_evidence(&PreparedChunkEvidence {
         chunk_id: chunk.chunk_id,
         operation_id: chunk.operation_id,
@@ -4811,6 +4828,28 @@ mod tests {
     use super::*;
     use crate::migration::fixture::FailurePoint;
 
+    struct MaximumPageVerifier {
+        inner: Box<dyn super::super::connection::VerificationSession>,
+        maximum: u32,
+        requested: Vec<u32>,
+    }
+
+    impl super::super::connection::VerificationSession for MaximumPageVerifier {
+        fn select_page(
+            &mut self,
+            request: &KeysetPage,
+        ) -> super::super::connection::ConnectionResult<RowBatch> {
+            if request.limit > self.maximum {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "requested row limit {} exceeds configured maximum {}",
+                    request.limit, self.maximum
+                )));
+            }
+            self.requested.push(request.limit);
+            self.inner.select_page(request)
+        }
+    }
+
     #[cfg(feature = "migration-fault-injection")]
     fn pipeline_fixture() -> anyhow::Result<(
         InMemorySource,
@@ -5146,6 +5185,55 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn prepared_chunk_at_maximum_page_size_uses_a_bounded_tail_probe() -> anyhow::Result<()> {
+        let table = QualifiedTable {
+            namespace: Identifier::new("public")?,
+            name: Identifier::new("accounts")?,
+        };
+        let columns = vec![column("id", 0, "bigint")?, column("name", 1, "text")?];
+        let mut expected = RowBatch::new(columns.clone(), 2, 1_024);
+        expected.try_push(vec![DbValue::Unsigned(1), DbValue::Text("Ada".into())], 16)?;
+        expected.try_push(
+            vec![DbValue::Unsigned(2), DbValue::Text("Grace".into())],
+            20,
+        )?;
+        let shape = TableShape {
+            projection: vec![Identifier::new("id")?, Identifier::new("name")?],
+            key: vec![Identifier::new("id")?],
+            key_indexes: vec![0],
+            writable_indexes: vec![0, 1],
+            write_policy: PostgresWritePolicy::BinaryCopyWithInsertFallbackV1,
+        };
+        let target = InMemoryTarget::default();
+        target.add_empty_table(table.clone(), columns);
+        let mut writer = target.open_writer(CancellationToken::default())?;
+        writer.begin()?;
+        writer.insert(&table, &expected)?;
+        writer.commit()?;
+        let final_key = batch_final_key(&expected, &shape)?.0;
+        let mut verifier = MaximumPageVerifier {
+            inner: target.open_verifier(CancellationToken::default())?,
+            maximum: 2,
+            requested: Vec::new(),
+        };
+
+        let (row_count, digest) = inspect_prepared_target_effect(
+            &mut verifier,
+            &table,
+            &shape,
+            None,
+            &final_key,
+            2,
+            &expected,
+        )?;
+
+        assert_eq!(row_count, 2);
+        assert_eq!(digest, batch_digest(&table, &shape, &expected)?);
+        assert_eq!(verifier.requested, vec![2, 1]);
+        Ok(())
     }
 
     #[test]
