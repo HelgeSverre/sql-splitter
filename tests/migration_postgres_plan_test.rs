@@ -450,6 +450,18 @@ fn live_postgres_blocking_code_registry_matrix() -> anyhow::Result<()> {
          GRANT SELECT ON ALL TABLES IN SCHEMA blocking_matrix TO migration_reader",
     )?;
     let snapshot = inspect_endpoint(&source_config)?;
+    assert!(snapshot.unsupported.objects.iter().any(|finding| {
+        finding.code == UnsupportedObjectCode::UserTypeDdl
+            && finding.object_kind == "postgres_type:d"
+            && finding.reason.contains("domain")
+            && finding.required_semantics
+    }));
+    assert!(snapshot.unsupported.objects.iter().any(|finding| {
+        finding.code == UnsupportedObjectCode::UserDefinedColumnType
+            && finding.object_id.starts_with("column:")
+            && finding.reason.contains("domain")
+            && finding.required_semantics
+    }));
     observed.extend(
         snapshot
             .unsupported

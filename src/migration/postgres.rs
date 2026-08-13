@@ -5072,7 +5072,10 @@ fn write_parameter(value: &DbValue, ty: &Type) -> ConnectionResult<Box<dyn ToSql
         DbValue::Float32(bits) if *ty == Type::FLOAT4 => Ok(Box::new(f32::from_bits(*bits))),
         DbValue::Float64(bits) if *ty == Type::FLOAT8 => Ok(Box::new(f64::from_bits(*bits))),
         DbValue::Text(value)
-            if matches!(*ty, Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME) =>
+            if matches!(
+                *ty,
+                Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::XML
+            ) =>
         {
             Ok(Box::new(RawParameter {
                 oid: ty.oid(),
@@ -5579,6 +5582,16 @@ fn decode_value(
         }
         Type::TIME => {
             decode_time(&bytes).map_err(|error| ConnectionError::Database(error.to_string()))
+        }
+        Type::TIMESTAMP | Type::TIMESTAMPTZ
+            if bytes.as_slice() == i64::MIN.to_be_bytes()
+                || bytes.as_slice() == i64::MAX.to_be_bytes() =>
+        {
+            Ok(DbValue::Vendor {
+                type_id: format!("postgres:{}:{}", ty.oid(), ty.name()),
+                format: ValueFormat::Binary,
+                bytes,
+            })
         }
         Type::TIMESTAMP | Type::TIMESTAMPTZ => {
             let precision = metadata.and_then(|column| column.precision).unwrap_or(6);
@@ -6170,11 +6183,16 @@ fn extract_catalog(
         let name: String = row.get(2);
         let type_kind: String = row.get(3);
         let definition: String = row.get(4);
+        let reason = if type_kind == "d" {
+            "PostgreSQL domain DDL and domain constraints are not implemented"
+        } else {
+            "user-defined PostgreSQL type DDL is not implemented"
+        };
         unsupported.push(UnsupportedObject {
             code: UnsupportedObjectCode::UserTypeDdl,
             object_id: id.clone(),
             object_kind: format!("postgres_type:{type_kind}"),
-            reason: "user-defined PostgreSQL type DDL is not implemented".into(),
+            reason: reason.into(),
             required_semantics: true,
         });
         push_object(
@@ -6231,7 +6249,7 @@ fn extract_catalog(
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT ('column:' || a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', 'relation:' || c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', CASE WHEN a.attgenerated = '' THEN pg_get_expr(ad.adbin, ad.adrelid, false) END, 'generated_expression', CASE WHEN a.attgenerated = 's' THEN pg_get_expr(ad.adbin, ad.adrelid, false) END, 'sequence_default_oid', (SELECT 'relation:' || dd.refobjid::text FROM pg_depend dd JOIN pg_class seq ON seq.oid = dd.refobjid AND seq.relkind = 'S' WHERE ad.oid IS NOT NULL AND a.attgenerated = '' AND dd.classid = 'pg_attrdef'::regclass AND dd.objid = ad.oid AND dd.refclassid = 'pg_class'::regclass AND dd.deptype = 'n'), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'collation_schema', CASE WHEN a.attcollation = 0 THEN NULL ELSE colln.nspname END, 'collation_provider', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collprovider::text END, 'collation_deterministic', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collisdeterministic END, 'collation_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collversion END, 'collation_actual_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE pg_collation_actual_version(coll.oid) END, 'type_schema', typen.nspname, 'type_name', typ.typname, 'numeric_precision', information_schema._pg_numeric_precision(a.atttypid, a.atttypmod), 'numeric_scale', information_schema._pg_numeric_scale(a.atttypid, a.atttypmod), 'datetime_precision', information_schema._pg_datetime_precision(a.atttypid, a.atttypmod), 'character_maximum_length', information_schema._pg_char_max_length(a.atttypid, a.atttypmod))::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation LEFT JOIN pg_namespace colln ON colln.oid = coll.collnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
+        "SELECT ('column:' || a.attrelid::text || ':' || a.attnum::text), n.nspname, a.attname, 'column', pg_catalog.format_type(a.atttypid, a.atttypmod), jsonb_build_object('table_oid', 'relation:' || c.oid::text, 'table', c.relname, 'ordinal', a.attnum, 'nullable', NOT a.attnotnull, 'default', CASE WHEN a.attgenerated = '' THEN pg_get_expr(ad.adbin, ad.adrelid, false) END, 'generated_expression', CASE WHEN a.attgenerated = 's' THEN pg_get_expr(ad.adbin, ad.adrelid, false) END, 'sequence_default_oid', (SELECT 'relation:' || dd.refobjid::text FROM pg_depend dd JOIN pg_class seq ON seq.oid = dd.refobjid AND seq.relkind = 'S' WHERE ad.oid IS NOT NULL AND a.attgenerated = '' AND dd.classid = 'pg_attrdef'::regclass AND dd.objid = ad.oid AND dd.refclassid = 'pg_class'::regclass AND dd.deptype = 'n'), 'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'collation', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collname END, 'collation_schema', CASE WHEN a.attcollation = 0 THEN NULL ELSE colln.nspname END, 'collation_provider', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collprovider::text END, 'collation_deterministic', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collisdeterministic END, 'collation_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE coll.collversion END, 'collation_actual_version', CASE WHEN a.attcollation = 0 THEN NULL ELSE pg_collation_actual_version(coll.oid) END, 'type_schema', typen.nspname, 'type_name', typ.typname, 'type_kind', typ.typtype::text, 'numeric_precision', information_schema._pg_numeric_precision(a.atttypid, a.atttypmod), 'numeric_scale', information_schema._pg_numeric_scale(a.atttypid, a.atttypmod), 'datetime_precision', information_schema._pg_datetime_precision(a.atttypid, a.atttypmod), 'character_maximum_length', information_schema._pg_char_max_length(a.atttypid, a.atttypmod))::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_type typ ON typ.oid = a.atttypid JOIN pg_namespace typen ON typen.oid = typ.typnamespace LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum LEFT JOIN pg_collation coll ON coll.oid = a.attcollation LEFT JOIN pg_namespace colln ON colln.oid = coll.collnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum",
         CatalogObjectKind::Column,
     )?;
     let generated_dependency_rows = transaction.query(
@@ -6359,11 +6377,21 @@ fn extract_catalog(
             .and_then(serde_json::Value::as_str)
             != Some("pg_catalog")
         {
+            let reason = if object
+                .attributes
+                .get("type_kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("d")
+            {
+                "PostgreSQL domain columns are not reproduced by the executor"
+            } else {
+                "user-defined PostgreSQL types are not reproduced by the executor"
+            };
             unsupported.push(UnsupportedObject {
                 code: UnsupportedObjectCode::UserDefinedColumnType,
                 object_id: object.id.clone(),
                 object_kind: "user_defined_column_type".into(),
-                reason: "user-defined PostgreSQL types are not reproduced by the executor".into(),
+                reason: reason.into(),
                 required_semantics: true,
             });
         }
@@ -6391,7 +6419,7 @@ fn extract_catalog(
     append_query_objects(
         transaction,
         &mut namespaces,
-        "SELECT 'constraint:' || con.oid::text, n.nspname, con.conname, 'constraint', pg_get_constraintdef(con.oid, true), jsonb_build_object('table_oid', 'relation:' || con.conrelid::text, 'type', con.contype::text, 'validated', con.convalidated, 'deferrable', con.condeferrable, 'deferred', con.condeferred, 'parent_constraint_oid', CASE WHEN con.conparentid = 0 THEN NULL ELSE 'constraint:' || con.conparentid::text END, 'referenced_table_oid', CASE WHEN con.confrelid = 0 THEN NULL ELSE 'relation:' || con.confrelid::text END, 'columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.conkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'referenced_columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.confkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'match_type', con.confmatchtype::text, 'update_action', con.confupdtype::text, 'delete_action', con.confdeltype::text, 'delete_set_columns', to_jsonb(con)->'confdelsetcols')::text FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ORDER BY n.nspname, con.conname, con.oid",
+        "SELECT 'constraint:' || con.oid::text, n.nspname, con.conname, 'constraint', pg_get_constraintdef(con.oid, true), jsonb_build_object('table_oid', 'relation:' || con.conrelid::text, 'type', con.contype::text, 'validated', con.convalidated, 'deferrable', con.condeferrable, 'deferred', con.condeferred, 'parent_constraint_oid', CASE WHEN con.conparentid = 0 THEN NULL ELSE 'constraint:' || con.conparentid::text END, 'referenced_table_oid', CASE WHEN con.confrelid = 0 THEN NULL ELSE 'relation:' || con.confrelid::text END, 'columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.conkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'referenced_columns', COALESCE((SELECT jsonb_agg(att.attname ORDER BY keys.ordinality) FROM unnest(con.confkey) WITH ORDINALITY keys(attnum, ordinality) JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = keys.attnum), '[]'::jsonb), 'match_type', con.confmatchtype::text, 'update_action', con.confupdtype::text, 'delete_action', con.confdeltype::text, 'delete_set_columns', to_jsonb(con)->'confdelsetcols')::text FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND con.conrelid <> 0 ORDER BY n.nspname, con.conname, con.oid",
         CatalogObjectKind::CheckConstraint,
     )?;
     append_query_objects(
@@ -9603,6 +9631,48 @@ credential_env = "PGPASSWORD"
                 bytes: br#"{"a":1,"a":2}"#.to_vec(),
             }
         );
+    }
+
+    #[test]
+    fn xml_text_and_non_finite_timestamps_use_lossless_postgres_parameters() {
+        let xml = DbValue::Text("<root attribute=\"exact\">åß水</root>".into());
+        let xml_parameter = write_parameter(&xml, &Type::XML).unwrap();
+        let mut encoded = BytesMut::new();
+        assert!(matches!(
+            xml_parameter
+                .to_sql_checked(&Type::XML, &mut encoded)
+                .unwrap(),
+            IsNull::No
+        ));
+        assert_eq!(
+            encoded.as_ref(),
+            "<root attribute=\"exact\">åß水</root>".as_bytes()
+        );
+
+        for (ty, sentinel) in [
+            (Type::TIMESTAMP, i64::MIN),
+            (Type::TIMESTAMP, i64::MAX),
+            (Type::TIMESTAMPTZ, i64::MIN),
+            (Type::TIMESTAMPTZ, i64::MAX),
+        ] {
+            let bytes = sentinel.to_be_bytes().to_vec();
+            let value = decode_value(&ty, Some(RawBinary(bytes.clone())), None).unwrap();
+            assert_eq!(
+                value,
+                DbValue::Vendor {
+                    type_id: format!("postgres:{}:{}", ty.oid(), ty.name()),
+                    format: ValueFormat::Binary,
+                    bytes: bytes.clone(),
+                }
+            );
+            let parameter = write_parameter(&value, &ty).unwrap();
+            let mut rebound = BytesMut::new();
+            assert!(matches!(
+                parameter.to_sql_checked(&ty, &mut rebound).unwrap(),
+                IsNull::No
+            ));
+            assert_eq!(rebound.as_ref(), bytes.as_slice());
+        }
     }
 
     #[test]
