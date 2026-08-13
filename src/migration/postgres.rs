@@ -8487,6 +8487,8 @@ pub fn write_live_postgres_external_quiesce_attestation(
         ),
         Some(prior) => {
             prior.validate_for_plan(
+                &reviewed.plan.migration_id,
+                reviewed.plan_hash.as_str(),
                 &source.endpoint_identity,
                 &source_catalog_fingerprint,
                 issued_at_unix_seconds,
@@ -8504,6 +8506,8 @@ pub fn write_live_postgres_external_quiesce_attestation(
     };
     let attestation = PostgresExternalQuiesceAttestation {
         schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+        migration_id: reviewed.plan.migration_id.clone(),
+        plan_hash: reviewed.plan_hash.to_string(),
         source_endpoint_identity: source.endpoint_identity,
         source_catalog_fingerprint,
         attestation_reference: attestation_reference.to_owned(),

@@ -133,10 +133,9 @@ sequences for the reviewed external-quiesce profile through the start/end
 state-equality and optional full-source re-scan contract in
 [14](./14-managed-source-profiles.md). That local PostgreSQL 15–17 matrix is
 complete. The Amazon RDS PostgreSQL 16.14 matrix proved the data and sequence
-contracts, but a later killed-process test reopened the managed-provider exit
-gate because the original CLI could not create or renew the required
-external-quiesce artifact. The implemented renewal workflow and pending RDS
-revalidation are recorded in
+contracts. Its follow-up killed-process test also proved that an expired
+initial artifact is rejected and its exact continuous renewal can resume and
+complete 420,050 rows after `SIGKILL`. The evidence is recorded in
 [14](./14-managed-source-profiles.md#recorded-provider-evidence). Fence installation
 transfers sequence ownership to the administrator, removes effective `USAGE`
 and `UPDATE` from non-superuser login roles, terminates old sessions that can

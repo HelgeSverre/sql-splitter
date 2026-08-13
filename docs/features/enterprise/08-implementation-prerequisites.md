@@ -32,17 +32,17 @@ plan-bound outage projection is enforced at execute preflight with live
 over-budget rejection evidence. This is spike evidence within the
 feature-gated command, not a production support statement.
 
-Implementation Phase 5b initially appeared to meet its exit condition on
-2026-08-12. The real-provider matrix passed against Amazon RDS for PostgreSQL
-16.14 with a non-superuser
+Implementation Phase 5b met its exit condition on 2026-08-13. The real-provider
+matrix passed against Amazon RDS for PostgreSQL 16.14 with a non-superuser
 administrator that is a member of `rds_superuser`. All six administrator
 profile probes passed. The same run proved that a withdrawn external-quiesce
 attestation and changed sequence state stop resume, and that an unchanged
 `CACHE 1` sequence completes with exact start/end equality evidence. The
-2026-08-13 killed-process test then proved that the command set could not create
-or renew the attestation needed for RDS resume. The exit gate is open until the
-new protected attestation and renewal workflow passes that killed-process case
-on RDS. The provider evidence and exact remaining gate are recorded in
+first killed-process test exposed the missing attestation creation and renewal
+commands. After those commands were added, a 420,050-row run survived
+`SIGKILL`, rejected its expired initial evidence, resumed through an exact
+continuous renewal, completed strict verification, and passed an independent
+source/target comparison. The provider evidence and exact boundary are recorded in
 [14](./14-managed-source-profiles.md#recorded-provider-evidence). This remains
 feature-gated spike evidence and does not claim provider control-plane
 automation or general production support.

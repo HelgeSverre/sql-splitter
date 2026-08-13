@@ -2074,6 +2074,8 @@ fn validate_external_quiesce_admission(
                 .map_err(|error| anyhow!(error.to_string()))?;
             attestation
                 .validate_for_plan(
+                    &reviewed.plan.migration_id,
+                    reviewed.plan_hash.as_str(),
                     source_endpoint_identity,
                     source_catalog_fingerprint,
                     observed_at,
@@ -2116,6 +2118,13 @@ fn validate_external_quiesce_resume(
             current
                 .validate()
                 .map_err(|error| anyhow!(error.to_string()))?;
+            if current.migration_id != reviewed.plan.migration_id
+                || current.plan_hash != reviewed.plan_hash.as_str()
+            {
+                return Err(anyhow!(
+                    "external-quiesce attestation differs from the reviewed plan"
+                ));
+            }
             let supplied: PostgresExternalQuiesceAttestation = read_json(path)?;
             supplied
                 .validate()
@@ -5263,6 +5272,8 @@ mod tests {
         let current = PostgresExternalQuiesceAttestation {
             schema_version:
                 super::super::postgres_profile::POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            migration_id: reviewed.plan.migration_id.clone(),
+            plan_hash: reviewed.plan_hash.to_string(),
             source_endpoint_identity: reviewed.plan.source_endpoint_identity.clone(),
             source_catalog_fingerprint: reviewed.plan.source_catalog_fingerprint.clone(),
             attestation_reference: "CHANGE-123".into(),
@@ -5277,6 +5288,16 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert!(admission.renewal_previous_digest.is_none());
+
+        let mut different_plan = reviewed.plan.clone();
+        different_plan.migration_id = "external-quiesce-other-plan".into();
+        let different_plan = ReviewedPlan::new(different_plan).unwrap();
+        assert!(validate_external_quiesce_resume(
+            &different_plan,
+            Some(&current),
+            Some(&current_path)
+        )
+        .is_err());
 
         let expired = PostgresExternalQuiesceAttestation {
             issued_at_unix_seconds: 1,

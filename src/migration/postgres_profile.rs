@@ -236,6 +236,8 @@ pub enum PostgresExternalQuiesceStatus {
 #[serde(deny_unknown_fields)]
 pub struct PostgresExternalQuiesceAttestation {
     pub schema_version: u16,
+    pub migration_id: String,
+    pub plan_hash: String,
     pub source_endpoint_identity: String,
     pub source_catalog_fingerprint: String,
     pub attestation_reference: String,
@@ -258,6 +260,8 @@ impl PostgresExternalQuiesceAttestation {
         if self.schema_version != POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION {
             return Err(PostgresSourceProfileError::UnsupportedVersion);
         }
+        require_nonempty(&self.migration_id)?;
+        require_sha256(&self.plan_hash)?;
         require_nonempty(&self.source_endpoint_identity)?;
         require_sha256(&self.source_catalog_fingerprint)?;
         require_nonempty(&self.attestation_reference)?;
@@ -285,6 +289,8 @@ impl PostgresExternalQuiesceAttestation {
         previous.validate()?;
         let previous_digest = previous.canonical_hash()?;
         if self.previous_attestation_digest.as_deref() != Some(previous_digest.as_str())
+            || self.migration_id != previous.migration_id
+            || self.plan_hash != previous.plan_hash
             || self.source_endpoint_identity != previous.source_endpoint_identity
             || self.source_catalog_fingerprint != previous.source_catalog_fingerprint
             || self.attestation_reference != previous.attestation_reference
@@ -322,12 +328,16 @@ impl PostgresExternalQuiesceAttestation {
 
     pub fn validate_for_plan(
         &self,
+        migration_id: &str,
+        plan_hash: &str,
         source_endpoint_identity: &str,
         source_catalog_fingerprint: &str,
         observed_at_unix_seconds: u64,
     ) -> Result<(), PostgresSourceProfileError> {
         self.require_active_at(observed_at_unix_seconds)?;
-        if self.source_endpoint_identity != source_endpoint_identity
+        if self.migration_id != migration_id
+            || self.plan_hash != plan_hash
+            || self.source_endpoint_identity != source_endpoint_identity
             || self.source_catalog_fingerprint != source_catalog_fingerprint
         {
             return Err(PostgresSourceProfileError::ProfileEvidenceMismatch);
@@ -655,6 +665,8 @@ mod tests {
     fn external_attestation_must_be_active_and_current() {
         let mut attestation = PostgresExternalQuiesceAttestation {
             schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            migration_id: "migration-1".into(),
+            plan_hash: "b".repeat(64),
             source_endpoint_identity: "postgres://source/app?user=reader".into(),
             source_catalog_fingerprint: "a".repeat(64),
             attestation_reference: "CHANGE-1234".into(),
@@ -679,6 +691,8 @@ mod tests {
     fn external_attestation_renewal_requires_an_overlapping_exact_chain() {
         let initial = PostgresExternalQuiesceAttestation {
             schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            migration_id: "migration-1".into(),
+            plan_hash: "b".repeat(64),
             source_endpoint_identity: "postgres://source/app?user=reader".into(),
             source_catalog_fingerprint: "a".repeat(64),
             attestation_reference: "CHANGE-1234".into(),
@@ -690,6 +704,8 @@ mod tests {
         initial.validate_initial().unwrap();
         let mut renewal = PostgresExternalQuiesceAttestation {
             schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            migration_id: initial.migration_id.clone(),
+            plan_hash: initial.plan_hash.clone(),
             source_endpoint_identity: initial.source_endpoint_identity.clone(),
             source_catalog_fingerprint: initial.source_catalog_fingerprint.clone(),
             attestation_reference: initial.attestation_reference.clone(),
@@ -699,6 +715,12 @@ mod tests {
             status: PostgresExternalQuiesceStatus::Active,
         };
         renewal.validate_renewal_from(&initial).unwrap();
+        let mut wrong_plan = renewal.clone();
+        wrong_plan.plan_hash = "c".repeat(64);
+        assert!(matches!(
+            wrong_plan.validate_renewal_from(&initial),
+            Err(PostgresSourceProfileError::InvalidAttestationChain)
+        ));
         renewal.issued_at_unix_seconds = 2_001;
         assert!(matches!(
             renewal.validate_renewal_from(&initial),

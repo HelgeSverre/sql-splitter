@@ -120,9 +120,9 @@ This follows the same manual reproducible-matrix posture as
 
 The Phase 5b provider matrix passed on 2026-08-12 with this exact boundary:
 
-| Provider   | Engine           | Administrator class                     | Managed-administrator probes | External-quiesce execution                                                                                                                  |
-| ---------- | ---------------- | --------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Amazon RDS | PostgreSQL 16.14 | non-superuser member of `rds_superuser` | all six requirements proven  | withdrawal stop, sequence-drift stop, `CACHE 1` equality, and exact data passed; killed-process resume awaits renewal-workflow revalidation |
+| Provider   | Engine           | Administrator class                     | Managed-administrator probes | External-quiesce execution                                                                                                                                                      |
+| ---------- | ---------------- | --------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Amazon RDS | PostgreSQL 16.14 | non-superuser member of `rds_superuser` | all six requirements proven  | withdrawal and expiry stops, sequence-drift stop, `CACHE 1` equality, SIGKILL plus continuous-renewal resume, strict verification, and independent exact-data comparison passed |
 
 The reproducible ignored test is
 `live_managed_provider_phase5b_matrix`. It creates isolated test roles and
@@ -131,10 +131,14 @@ TLS with the regional CA bundle, and removes those objects after the run. It
 records only provider, engine version, administrator class, and typed probe
 outcomes. It does not record the endpoint or credentials.
 
-The 2026-08-13 killed-process test found that the original command set could
-consume an external-quiesce attestation but could not create or renew one. The
-profile remains implemented, but the provider exit gate is open until the
-artifact workflow below passes a killed-process resume on RDS. The
+The 2026-08-13 killed-process test first found that the original command set
+could consume an external-quiesce attestation but could not create or renew
+one. After the workflow below was added, a 420,050-row run was terminated with
+`SIGKILL` after 49,822 source events. Resume rejected the expired initial
+artifact, admitted its continuous renewal, completed 95 chunks with strict
+verification, and matched independent source and target counts and aggregates.
+This closes the managed-provider Phase 5b exit gate for the exact provider and
+version above. The
 `managed-administrator` probe suite also predicts that the tested role can meet
 all six fence prerequisites. A full provider write-fence execution matrix was
 not run, so this statement does not admit database-enforced
@@ -168,11 +172,12 @@ Selected contract (mailbox [021-codex]/[023]):
   `freeze_enforced_by_tool: false`; validation rejects a plan that claims the
   tool enforces that freeze.
 - **Attestation artifact.** The external-quiesce attestation is a
-  protected typed artifact: schema version, attestation reference, exact
-  source endpoint and catalog fingerprint, issued and expiry times, active or
-  withdrawn status, and an optional previous-attestation digest. Initial
+  protected typed artifact: schema version, migration ID, reviewed plan hash,
+  attestation reference, exact source endpoint and catalog fingerprint, issued
+  and expiry times, active or withdrawn status, and an optional
+  previous-attestation digest. Initial
   evidence has no previous digest. A renewal must name the exact prior digest,
-  keep the same endpoint, catalog, and reference, be issued before the prior
+  keep the same plan, endpoint, catalog, and reference, be issued before the prior
   expiry, and extend that expiry. Execute accepts initial evidence and binds
   its canonical digest at journal genesis. Resume accepts the current durable
   evidence or one continuous renewal. It appends and synchronizes the renewal
@@ -216,9 +221,10 @@ The complete RDS command order is:
 6. After a process restart, pass the current artifact or its direct renewal to
    `resume-postgres --external-quiesce-attestation`.
 
-This is not a signed provider assertion. Filesystem protection and the reviewed
-source binding protect the local artifact. The operator and the named external
-change system remain responsible for freeze truth and continuity.
+This is not a signed provider assertion. Filesystem protection plus the
+reviewed migration, plan, and source bindings protect the local artifact. The
+operator and the named external change system remain responsible for freeze
+truth and continuity.
 
 ## MySQL freeze profile (Phase 6)
 

@@ -160,6 +160,8 @@ impl Genesis {
                     .validate_initial()
                     .map_err(|_| AppendJournalError::InvalidGenesis)?;
                 if attestation.status != PostgresExternalQuiesceStatus::Active
+                    || attestation.migration_id != self.reviewed_plan.plan.migration_id
+                    || attestation.plan_hash != self.reviewed_plan.plan_hash.as_str()
                     || attestation.source_endpoint_identity
                         != self.reviewed_plan.plan.source_endpoint_identity
                     || attestation.source_catalog_fingerprint
@@ -969,7 +971,8 @@ impl AppendJournal {
     pub fn read_snapshot(
         path: impl AsRef<Path>,
     ) -> Result<Option<JournalSnapshot>, AppendJournalError> {
-        let path = path.as_ref();
+        let path = absolute_journal_path(path.as_ref())?;
+        let path = path.as_path();
         validate_parent(path)?;
         let mut options = OpenOptions::new();
         options.read(true);
@@ -990,7 +993,8 @@ impl AppendJournal {
         genesis: Genesis,
     ) -> Result<Self, AppendJournalError> {
         genesis.validate()?;
-        let path = path.as_ref();
+        let path = absolute_journal_path(path.as_ref())?;
+        let path = path.as_path();
         validate_parent(path)?;
         let mut options = OpenOptions::new();
         options.read(true).append(true).create_new(true);
@@ -1031,7 +1035,8 @@ impl AppendJournal {
     }
 
     pub fn open_resume(path: impl AsRef<Path>) -> Result<Self, AppendJournalError> {
-        let path = path.as_ref();
+        let path = absolute_journal_path(path.as_ref())?;
+        let path = path.as_path();
         validate_parent(path)?;
         let mut options = OpenOptions::new();
         options.read(true).append(true);
@@ -1862,6 +1867,14 @@ fn validate_file_header(file: &mut File) -> Result<(), AppendJournalError> {
     Ok(())
 }
 
+fn absolute_journal_path(path: &Path) -> Result<PathBuf, AppendJournalError> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
 fn validate_parent(path: &Path) -> Result<(), AppendJournalError> {
     let parent = path
         .parent()
@@ -2168,6 +2181,8 @@ mod tests {
 
         let attestation = PostgresExternalQuiesceAttestation {
             schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            migration_id: genesis.reviewed_plan.plan.migration_id.clone(),
+            plan_hash: genesis.reviewed_plan.plan_hash.to_string(),
             source_endpoint_identity: genesis.reviewed_plan.plan.source_endpoint_identity.clone(),
             source_catalog_fingerprint: genesis
                 .reviewed_plan
@@ -2217,6 +2232,8 @@ mod tests {
         genesis.accepted_outage_projection = None;
         let initial = PostgresExternalQuiesceAttestation {
             schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            migration_id: genesis.reviewed_plan.plan.migration_id.clone(),
+            plan_hash: genesis.reviewed_plan.plan_hash.to_string(),
             source_endpoint_identity: genesis.reviewed_plan.plan.source_endpoint_identity.clone(),
             source_catalog_fingerprint: genesis
                 .reviewed_plan
@@ -2235,6 +2252,8 @@ mod tests {
 
         let renewal = PostgresExternalQuiesceAttestation {
             schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            migration_id: initial.migration_id.clone(),
+            plan_hash: initial.plan_hash.clone(),
             source_endpoint_identity: initial.source_endpoint_identity.clone(),
             source_catalog_fingerprint: initial.source_catalog_fingerprint.clone(),
             attestation_reference: initial.attestation_reference.clone(),
@@ -2282,6 +2301,8 @@ mod tests {
         genesis.accepted_outage_projection = None;
         let attestation = PostgresExternalQuiesceAttestation {
             schema_version: POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
+            migration_id: genesis.reviewed_plan.plan.migration_id.clone(),
+            plan_hash: genesis.reviewed_plan.plan_hash.to_string(),
             source_endpoint_identity: genesis.reviewed_plan.plan.source_endpoint_identity.clone(),
             source_catalog_fingerprint: genesis
                 .reviewed_plan
@@ -2575,6 +2596,21 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn relative_journal_path_is_resolved_once_and_resumes() {
+        let directory = private_tempdir();
+        let absolute = directory.path().join("relative-state");
+        let current = std::env::current_dir().unwrap();
+        let relative = absolute.strip_prefix(&current).unwrap();
+        let journal = AppendJournal::create_new(relative, genesis()).unwrap();
+        assert!(journal.path.is_absolute());
+        assert_eq!(journal.path, absolute);
+        drop(journal);
+
+        let resumed = AppendJournal::open_resume(relative).unwrap();
+        assert_eq!(resumed.path, absolute);
     }
 
     #[test]
