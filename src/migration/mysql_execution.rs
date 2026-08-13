@@ -1023,6 +1023,8 @@ fn mysql_resume_binding(
         outage_projection_digest: None,
         external_quiesce_attestation_digest: None,
         mysql_freeze_attestation_digest: Some(accepted.canonical_hash()?),
+        target_protection_evidence_digest: None,
+        warm_target_baseline_digest: None,
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     })
@@ -1105,6 +1107,8 @@ fn mysql_journal_genesis(
         accepted_outage_projection: None,
         accepted_external_quiesce: None,
         accepted_mysql_freeze: Some(accepted),
+        accepted_target_protection: None,
+        accepted_warm_target_baseline: None,
         operations,
     }
 }
@@ -4051,6 +4055,8 @@ mod tests {
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: Some(freeze.canonical_hash().unwrap()),
+            target_protection_evidence_digest: None,
+            warm_target_baseline_digest: None,
             conversion_policy: reviewed.plan.conversion_policy.clone(),
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
@@ -4062,6 +4068,8 @@ mod tests {
                 accepted_outage_projection: None,
                 accepted_external_quiesce: None,
                 accepted_mysql_freeze: Some(freeze),
+                accepted_target_protection: None,
+                accepted_warm_target_baseline: None,
                 operations,
             },
         )

@@ -13,16 +13,18 @@ use super::journal::{ConsistencyEvidence, MigrationStatus, OperationState, Resum
 use super::model::{CatalogObjectKind, DbValue};
 use super::mysql_profile::{MySqlExternalFreezeAttestation, MySqlFreezeAttestationStatus};
 use super::outage_projection::AcceptedOutageProjection;
-use super::plan::{OperationKind, ReviewedPlan};
+use super::plan::{AssessmentStatus, OperationKind, ReviewedPlan, TargetModeContract};
 use super::postgres::{postgres_sequences, PostgresSequence, POSTGRES_CONSISTENCY_SNAPSHOT};
 use super::postgres_profile::{
     PostgresExternalQuiesceAttestation, PostgresExternalQuiesceRescanEvidence,
     PostgresExternalQuiesceStatus, PostgresSequenceEqualityEvidence, PostgresSourceProfileContract,
 };
+use super::target_baseline::AcceptedWarmTargetBaseline;
+use super::target_protection::AcceptedTargetProtectionEvidence;
 
 const FILE_MAGIC: &[u8; 8] = b"SSJNL001";
 const FRAME_MAGIC: u32 = 0x534a_4631;
-const FORMAT_VERSION: u16 = 6;
+const FORMAT_VERSION: u16 = 7;
 const FILE_HEADER_LEN: u64 = 10;
 const FRAME_HEADER_LEN: usize = 84;
 const FRAME_TRAILER_LEN: usize = 32;
@@ -90,6 +92,8 @@ pub struct Genesis {
     pub accepted_outage_projection: Option<AcceptedOutageProjection>,
     pub accepted_external_quiesce: Option<PostgresExternalQuiesceAttestation>,
     pub accepted_mysql_freeze: Option<MySqlExternalFreezeAttestation>,
+    pub accepted_target_protection: Option<AcceptedTargetProtectionEvidence>,
+    pub accepted_warm_target_baseline: Option<AcceptedWarmTargetBaseline>,
     pub operations: Vec<OperationSpec>,
 }
 
@@ -124,6 +128,7 @@ impl Genesis {
         {
             return Err(AppendJournalError::InvalidGenesis);
         }
+        self.validate_target_mode_evidence()?;
         match (
             self.reviewed_plan.plan.outage_policy.as_ref(),
             self.accepted_outage_projection.as_ref(),
@@ -301,6 +306,66 @@ impl Genesis {
             }
         }
         Ok(())
+    }
+
+    fn validate_target_mode_evidence(&self) -> Result<(), AppendJournalError> {
+        let mode = self
+            .reviewed_plan
+            .plan
+            .target_mode
+            .as_ref()
+            .and_then(AssessmentStatus::as_assessed)
+            .ok_or(AppendJournalError::InvalidGenesis)?;
+        match (
+            mode,
+            self.accepted_target_protection.as_ref(),
+            self.accepted_warm_target_baseline.as_ref(),
+            self.binding.target_protection_evidence_digest.as_ref(),
+            self.binding.warm_target_baseline_digest.as_ref(),
+        ) {
+            (TargetModeContract::EmptyOwned, None, None, None, None) => Ok(()),
+            (
+                TargetModeContract::WarmMerge(_),
+                Some(protection),
+                Some(baseline),
+                Some(protection_digest),
+                Some(baseline_digest),
+            ) => {
+                let observed_protection_digest = protection
+                    .canonical_hash(&self.reviewed_plan)
+                    .map_err(|_| AppendJournalError::InvalidGenesis)?;
+                if protection_digest != &observed_protection_digest {
+                    return Err(AppendJournalError::InvalidGenesis);
+                }
+                baseline
+                    .validate_against(&self.reviewed_plan, protection_digest)
+                    .map_err(|_| AppendJournalError::InvalidGenesis)?;
+                let observed_baseline_digest = baseline
+                    .canonical_hash(&self.reviewed_plan, protection_digest)
+                    .map_err(|_| AppendJournalError::InvalidGenesis)?;
+                if baseline_digest != &observed_baseline_digest {
+                    return Err(AppendJournalError::InvalidGenesis);
+                }
+                Ok(())
+            }
+            (
+                TargetModeContract::StagingSwap(_),
+                Some(protection),
+                None,
+                Some(protection_digest),
+                None,
+            ) => {
+                let observed_protection_digest = protection
+                    .canonical_hash(&self.reviewed_plan)
+                    .map_err(|_| AppendJournalError::InvalidGenesis)?;
+                if protection_digest == &observed_protection_digest {
+                    Ok(())
+                } else {
+                    Err(AppendJournalError::InvalidGenesis)
+                }
+            }
+            _ => Err(AppendJournalError::InvalidGenesis),
+        }
     }
 }
 
@@ -1959,22 +2024,32 @@ mod tests {
     use crate::migration::canonical::CANONICAL_ENCODING_VERSION;
     use crate::migration::conversion::{ConversionDialect, MigrationConversionPolicy};
     use crate::migration::journal::ConsistencyEvidence;
-    use crate::migration::model::{CatalogNamespace, CatalogObject, Identifier, VendorCatalog};
+    use crate::migration::model::{
+        CatalogNamespace, CatalogObject, CatalogObjectKind, Identifier, QualifiedTable,
+        VendorCatalog,
+    };
     use crate::migration::outage_projection::{
         ByteBasis, ReviewedOutagePolicy, ThroughputProfile, OUTAGE_PROJECTION_SCHEMA_VERSION,
         THROUGHPUT_PROFILE_SCHEMA_VERSION,
     };
     use crate::migration::plan::{
         AssessmentStatus, MigrationPlan, MySqlSnapshotEvidence, OperationKind, PlanOperation,
-        PlanPurpose, ReviewedPlan, UnsupportedObject, UnsupportedObjectCode,
-        UnsupportedObjectReport, MYSQL_SESSION_CHARACTER_SET, MYSQL_SESSION_COLLATION,
-        MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION, POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
+        PlanPurpose, ReviewedPlan, TargetCatalogItem, TargetObjectDisposition,
+        TargetOwnershipClaim, TargetOwnershipManifest, TargetProtectionContract,
+        TargetWriterIdentity, UnsupportedObject, UnsupportedObjectCode, UnsupportedObjectReport,
+        WarmMergeConflictPolicy, WarmMergeContract, WarmMergeTable, MYSQL_SESSION_CHARACTER_SET,
+        MYSQL_SESSION_COLLATION, MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION,
+        POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
     };
     use crate::migration::postgres_profile::{
         PostgresExternalQuiesceAttestation, PostgresExternalQuiesceRescanTableEvidence,
         PostgresExternalQuiesceStatus, PostgresSequenceEqualityEvidence,
         PostgresSourceProfileContract, POSTGRES_EXTERNAL_QUIESCE_ATTESTATION_SCHEMA_VERSION,
         POSTGRES_SOURCE_PROFILE_SCHEMA_VERSION,
+    };
+    use crate::migration::target_baseline::AcceptedWarmTableBaseline;
+    use crate::migration::target_protection::{
+        TargetProtectionBinding, TARGET_PROTECTION_EVIDENCE_SCHEMA_VERSION,
     };
 
     fn genesis() -> Genesis {
@@ -2092,6 +2167,8 @@ mod tests {
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: None,
+            target_protection_evidence_digest: None,
+            warm_target_baseline_digest: None,
             conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
@@ -2118,7 +2195,178 @@ mod tests {
             accepted_outage_projection: Some(accepted_outage_projection),
             accepted_external_quiesce: None,
             accepted_mysql_freeze: None,
+            accepted_target_protection: None,
+            accepted_warm_target_baseline: None,
             operations: specs,
+        }
+    }
+
+    fn warm_target_genesis() -> Genesis {
+        let table = QualifiedTable {
+            namespace: Identifier::new("public").unwrap(),
+            name: Identifier::new("items").unwrap(),
+        };
+        let source_catalog = test_catalog("source");
+        let target_catalog = VendorCatalog {
+            format_version: 1,
+            dialect: "postgresql".into(),
+            server_version: "17".into(),
+            database: Identifier::new("target").unwrap(),
+            namespaces: vec![CatalogNamespace {
+                id: "namespace:public".into(),
+                name: table.namespace.clone(),
+                owner: None,
+                charset: None,
+                collation: None,
+                objects: vec![CatalogObject {
+                    id: "relation:items".into(),
+                    kind: CatalogObjectKind::Table,
+                    name: table.name.clone(),
+                    definition: Vec::new(),
+                    attributes: BTreeMap::new(),
+                }],
+            }],
+            dependencies: Vec::new(),
+            vendor_metadata: BTreeMap::new(),
+        };
+        let source_fingerprint =
+            hex::encode(Sha256::digest(serde_json::to_vec(&source_catalog).unwrap()));
+        let target_fingerprint =
+            hex::encode(Sha256::digest(serde_json::to_vec(&target_catalog).unwrap()));
+        let operation = PlanOperation::new(
+            OperationKind::CopyTable,
+            Some(table.clone()),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let writer_identity =
+            TargetWriterIdentity::PostgreSqlRole(Identifier::new("migration_writer").unwrap());
+        let target_mode = TargetModeContract::WarmMerge(WarmMergeContract {
+            conflict_policy: WarmMergeConflictPolicy::RejectAnyKeyCollision,
+            target_protection: TargetProtectionContract::ExternalContinuousQuiesceV1 {
+                writer_identity: writer_identity.clone(),
+                provider_reference: "change-123".into(),
+            },
+            ownership: TargetOwnershipManifest {
+                target_catalog_fingerprint: target_fingerprint.clone(),
+                claims: vec![
+                    TargetOwnershipClaim {
+                        item: TargetCatalogItem::Namespace("namespace:public".into()),
+                        disposition: TargetObjectDisposition::Preserve,
+                    },
+                    TargetOwnershipClaim {
+                        item: TargetCatalogItem::Object("relation:items".into()),
+                        disposition: TargetObjectDisposition::MergeRows,
+                    },
+                ],
+            },
+            tables: vec![WarmMergeTable {
+                table: table.clone(),
+                target_table_object_id: "relation:items".into(),
+            }],
+        });
+        let reviewed_plan = ReviewedPlan::new(MigrationPlan {
+            schema_version: PLAN_SCHEMA_VERSION,
+            purpose: PlanPurpose::Execution,
+            migration_id: "warm-migration".into(),
+            tool_version: "test".into(),
+            source_endpoint_identity: "source".into(),
+            target_endpoint_identity: AssessmentStatus::Assessed("target".into()),
+            source_catalog_fingerprint: source_fingerprint.clone(),
+            target_catalog_fingerprint: AssessmentStatus::Assessed(target_fingerprint.clone()),
+            source_catalog: Some(source_catalog),
+            target_catalog: AssessmentStatus::Assessed(target_catalog),
+            source_tls_binding: "source-tls".into(),
+            target_tls_binding: AssessmentStatus::Assessed("target-tls".into()),
+            target_mode: Some(AssessmentStatus::Assessed(target_mode.clone())),
+            target_writer_identity: Some(writer_identity.clone()),
+            consistency_mode: "write-fence".into(),
+            canonical_encoding_version: CANONICAL_ENCODING_VERSION,
+            conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
+            outage_policy: None,
+            postgres_source_profile: None,
+            mysql_source_profile: None,
+            mysql_snapshot_evidence: None,
+            mysql_target_snapshot_evidence: None,
+            mysql_metadata_visibility: None,
+            mysql_target_metadata_visibility: None,
+            mysql_authorization: None,
+            capabilities: BTreeMap::new(),
+            operations: vec![operation.clone()],
+            unsupported_objects: UnsupportedObjectReport::default(),
+        })
+        .unwrap();
+        let protection = AcceptedTargetProtectionEvidence::ExternalContinuousQuiesceV1 {
+            binding: TargetProtectionBinding {
+                schema_version: TARGET_PROTECTION_EVIDENCE_SCHEMA_VERSION,
+                migration_id: reviewed_plan.plan.migration_id.clone(),
+                plan_hash: reviewed_plan.plan_hash.to_string(),
+                target_endpoint_identity: "target".into(),
+                target_catalog_fingerprint: target_fingerprint.clone(),
+                target_mode_hash: hex::encode(Sha256::digest(
+                    serde_json::to_vec(&target_mode).unwrap(),
+                )),
+                writer_identity,
+                activated_at_unix_seconds: 100,
+            },
+            provider_reference: "change-123".into(),
+            continuity_token_hash: "a".repeat(64),
+            expires_at_unix_seconds: 200,
+        };
+        let protection_digest = protection.canonical_hash(&reviewed_plan).unwrap();
+        let baseline = AcceptedWarmTargetBaseline::new(
+            &reviewed_plan,
+            protection_digest.clone(),
+            vec![AcceptedWarmTableBaseline {
+                table,
+                target_table_object_id: "relation:items".into(),
+                copy_operation_id: operation.id.to_string(),
+                baseline_row_count: 3,
+                baseline_rows_hash: "b".repeat(64),
+            }],
+        )
+        .unwrap();
+        let baseline_digest = baseline
+            .canonical_hash(&reviewed_plan, &protection_digest)
+            .unwrap();
+        Genesis {
+            binding: ResumeBinding {
+                migration_id: reviewed_plan.plan.migration_id.clone(),
+                plan_hash: reviewed_plan.plan_hash.to_string(),
+                approval_reference: "approval".into(),
+                tool_version: "test".into(),
+                source_endpoint: "source".into(),
+                target_endpoint: "target".into(),
+                consistency_evidence: ConsistencyEvidence::NativeSnapshot {
+                    endpoint_identity: "source".into(),
+                    database_identity: "source".into(),
+                    lifecycle_id: "lifecycle".into(),
+                    snapshot_id: "snapshot".into(),
+                    server_version: "17".into(),
+                },
+                source_schema_fingerprint: source_fingerprint,
+                target_schema_fingerprint: target_fingerprint,
+                outage_projection_digest: None,
+                external_quiesce_attestation_digest: None,
+                mysql_freeze_attestation_digest: None,
+                target_protection_evidence_digest: Some(protection_digest),
+                warm_target_baseline_digest: Some(baseline_digest),
+                conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
+                canonical_encoding_version: CANONICAL_ENCODING_VERSION,
+            },
+            reviewed_plan,
+            accepted_outage_projection: None,
+            accepted_external_quiesce: None,
+            accepted_mysql_freeze: None,
+            accepted_target_protection: Some(protection),
+            accepted_warm_target_baseline: Some(baseline),
+            operations: vec![OperationSpec {
+                operation_id: operation.id.to_string(),
+                dependencies: Vec::new(),
+                is_copy: true,
+                phase: OperationPhase::Execution,
+            }],
         }
     }
 
@@ -2212,6 +2460,58 @@ mod tests {
             PostgresExternalQuiesceStatus::Withdrawn;
         assert!(matches!(
             withdrawn.validate(),
+            Err(AppendJournalError::InvalidGenesis)
+        ));
+    }
+
+    #[test]
+    fn empty_target_genesis_rejects_nonempty_target_evidence_slots() {
+        let mut with_protection_digest = genesis();
+        with_protection_digest
+            .binding
+            .target_protection_evidence_digest = Some("0".repeat(64));
+        assert!(matches!(
+            with_protection_digest.validate(),
+            Err(AppendJournalError::InvalidGenesis)
+        ));
+
+        let mut with_baseline_digest = genesis();
+        with_baseline_digest.binding.warm_target_baseline_digest = Some("0".repeat(64));
+        assert!(matches!(
+            with_baseline_digest.validate(),
+            Err(AppendJournalError::InvalidGenesis)
+        ));
+    }
+
+    #[test]
+    fn warm_target_genesis_binds_protection_and_baseline_as_one_contract() {
+        let genesis = warm_target_genesis();
+        genesis.validate_target_mode_evidence().unwrap();
+
+        let mut wrong_protection = genesis.clone();
+        wrong_protection.binding.target_protection_evidence_digest = Some("0".repeat(64));
+        assert!(matches!(
+            wrong_protection.validate_target_mode_evidence(),
+            Err(AppendJournalError::InvalidGenesis)
+        ));
+
+        let mut missing_baseline = genesis.clone();
+        missing_baseline.accepted_warm_target_baseline = None;
+        missing_baseline.binding.warm_target_baseline_digest = None;
+        assert!(matches!(
+            missing_baseline.validate_target_mode_evidence(),
+            Err(AppendJournalError::InvalidGenesis)
+        ));
+
+        let mut changed_baseline = genesis;
+        changed_baseline
+            .accepted_warm_target_baseline
+            .as_mut()
+            .unwrap()
+            .tables[0]
+            .baseline_row_count += 1;
+        assert!(matches!(
+            changed_baseline.validate_target_mode_evidence(),
             Err(AppendJournalError::InvalidGenesis)
         ));
     }

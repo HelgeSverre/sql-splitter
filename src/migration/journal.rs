@@ -8,7 +8,7 @@ use super::conversion::MigrationConversionPolicy;
 use super::model::{DbValue, KeyTuple};
 use super::plan::ReviewedPlan;
 
-pub const STATE_SCHEMA_VERSION: u16 = 9;
+pub const STATE_SCHEMA_VERSION: u16 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
@@ -57,6 +57,8 @@ pub struct ResumeBinding {
     pub outage_projection_digest: Option<String>,
     pub external_quiesce_attestation_digest: Option<String>,
     pub mysql_freeze_attestation_digest: Option<String>,
+    pub target_protection_evidence_digest: Option<String>,
+    pub warm_target_baseline_digest: Option<String>,
     pub conversion_policy: MigrationConversionPolicy,
     pub canonical_encoding_version: u16,
 }
@@ -1080,6 +1082,8 @@ mod tests {
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: None,
+            target_protection_evidence_digest: None,
+            warm_target_baseline_digest: None,
             conversion_policy: super::super::plan::POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         }

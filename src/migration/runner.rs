@@ -546,6 +546,8 @@ fn append_journal_genesis(
         accepted_outage_projection,
         accepted_external_quiesce,
         accepted_mysql_freeze: None,
+        accepted_target_protection: None,
+        accepted_warm_target_baseline: None,
         operations,
     }
 }
@@ -1649,6 +1651,8 @@ fn execute_postgres_plan_internal(
         outage_projection_digest,
         external_quiesce_attestation_digest,
         mysql_freeze_attestation_digest: None,
+        target_protection_evidence_digest: None,
+        warm_target_baseline_digest: None,
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
@@ -4566,6 +4570,8 @@ pub fn run_fixture_spike(directory: impl AsRef<Path>) -> anyhow::Result<SpikeArt
         outage_projection_digest: None,
         external_quiesce_attestation_digest: None,
         mysql_freeze_attestation_digest: None,
+        target_protection_evidence_digest: None,
+        warm_target_baseline_digest: None,
         conversion_policy: reviewed.plan.conversion_policy.clone(),
         canonical_encoding_version: CANONICAL_ENCODING_VERSION,
     };
@@ -5119,6 +5125,8 @@ mod tests {
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: None,
+            target_protection_evidence_digest: None,
+            warm_target_baseline_digest: None,
             conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
@@ -5656,6 +5664,8 @@ mod tests {
             outage_projection_digest: None,
             external_quiesce_attestation_digest: None,
             mysql_freeze_attestation_digest: None,
+            target_protection_evidence_digest: None,
+            warm_target_baseline_digest: None,
             conversion_policy: POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY,
             canonical_encoding_version: CANONICAL_ENCODING_VERSION,
         };
