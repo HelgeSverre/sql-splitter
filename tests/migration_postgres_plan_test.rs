@@ -318,6 +318,10 @@ fn live_postgres_blocking_code_registry_matrix() -> anyhow::Result<()> {
             UnsupportedObjectCode::CrossDialectPerformanceIndex,
             "cross-dialect performance-index omissions are outside the PostgreSQL assessment matrix",
         ),
+        (
+            UnsupportedObjectCode::CrossDialectTextCollation,
+            "cross-dialect text-collation transformations are outside the PostgreSQL assessment matrix",
+        ),
     ];
     const NONBLOCKING_REPORT_REQUIRED: &[UnsupportedObjectCode] = &[
         UnsupportedObjectCode::NamespaceAcl,

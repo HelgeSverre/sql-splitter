@@ -10,7 +10,7 @@ enforce.
 
 Origin: the 2026-08-11 market-alignment plan's Phase 7 item and the design
 hazards raised in mailbox [083]. Serialization: row-conversion schema v3,
-plan schema v21, PostgreSQL catalog format v6, MySQL catalog format v5.
+plan schema v22, PostgreSQL catalog format v6, MySQL catalog format v5.
 
 ## Scope and safety model
 
@@ -29,7 +29,7 @@ plan schema v21, PostgreSQL catalog format v6, MySQL catalog format v5.
   metadata visibility are re-attested before each target effect and before
   completion.
 - Both directions can finish only as
-  `CompletedWithApprovedTransformations`. Plan schema v21 is the compatibility
+  `CompletedWithApprovedTransformations`. Plan schema v22 is the compatibility
   boundary for these source-consistency rules; older plans fail at schema
   validation.
 - **Every conversion rule is lossless-by-construction or fails closed.** This
@@ -49,6 +49,11 @@ plan schema v21, PostgreSQL catalog format v6, MySQL catalog format v5.
   performance but not stored-row integrity. Unique indexes that are not the
   selected key, foreign keys, and other schema objects remain blocking because
   they carry unimplemented data-integrity or behavioral semantics.
+- MySQL text values retain their exact UTF-8 bytes, but cross-dialect v1 does
+  not claim that a MySQL collation is behaviorally equivalent to the selected
+  PostgreSQL collation. The reviewed plan lists each text-column collation remap
+  as a non-blocking approved transformation and names both collations. Comparison,
+  sort, and uniqueness behavior can differ on the target.
 
 ## PostgreSQL → MySQL
 

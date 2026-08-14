@@ -9,7 +9,8 @@ use thiserror::Error;
 use super::artifact::{read_json, write_json_new, ArtifactError};
 use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::conversion::{
-    ConversionDialect, MigrationConversionPolicy, QualifiedIdentifier, TableConversionPolicy,
+    ConversionDialect, CrossDialectSourceType, MigrationConversionPolicy, MySqlTargetType,
+    QualifiedIdentifier, TableConversionPolicy,
 };
 use super::model::{CatalogObjectKind, Identifier, QualifiedTable, VendorCatalog};
 use super::mysql::{
@@ -417,6 +418,10 @@ pub fn build_mysql_to_postgres_plan(
         &source_visibility.authoritative_catalog,
         &policies,
     ));
+    unsupported.extend(mysql_to_postgres_collation_transformations(
+        &policies,
+        text_collation,
+    ));
     unsupported.extend(target.unsupported.objects.iter().cloned());
     let target_object_count = target
         .catalog
@@ -743,6 +748,54 @@ fn unmodeled_mysql_cross_dialect_objects(
         }
     }
     unsupported
+}
+
+fn mysql_to_postgres_collation_transformations(
+    policies: &[TableConversionPolicy],
+    target_collation: &QualifiedIdentifier,
+) -> Vec<UnsupportedObject> {
+    policies
+        .iter()
+        .flat_map(|policy| {
+            policy.row_policy.columns.iter().filter_map(|column| {
+                let CrossDialectSourceType::MySql(MySqlTargetType::Text {
+                    character_set,
+                    collation,
+                    ..
+                }) = &column.source_type
+                else {
+                    return None;
+                };
+                let table = &policy.source_table;
+                let source_column = &column.source.name;
+                let identity = [
+                    table.namespace.as_str(),
+                    table.name.as_str(),
+                    source_column.as_str(),
+                ]
+                .into_iter()
+                .map(|part| format!("{}:{part}", part.len()))
+                .collect::<Vec<_>>()
+                .join(":");
+                Some(UnsupportedObject {
+                    code: UnsupportedObjectCode::CrossDialectTextCollation,
+                    object_id: format!("cross-dialect-text-collation:{identity}"),
+                    object_kind: "cross_dialect_text_collation".into(),
+                    reason: format!(
+                        "MySQL text column {}.{}.{} uses character set {} and collation {}; cross-dialect v1 maps it to PostgreSQL collation {}.{}, so comparison, sort, and uniqueness behavior may differ",
+                        table.namespace,
+                        table.name,
+                        source_column,
+                        character_set,
+                        collation,
+                        target_collation.namespace,
+                        target_collation.name
+                    ),
+                    required_semantics: false,
+                })
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Error)]
@@ -1492,6 +1545,77 @@ pub(crate) mod tests {
         assert!(index_finding.reason.contains("items_lookup_idx"));
         assert!(index_finding.reason.contains("app.items"));
         assert!(index_finding.reason.contains("not recreated"));
+    }
+
+    #[test]
+    fn mysql_to_postgres_records_text_collation_semantics_as_a_transformation() {
+        let mut source = mysql_snapshot("mysql://source/app", true);
+        source.catalog.namespaces[0].objects.push(CatalogObject {
+            id: mysql_catalog_id("column", "app", "items", "label"),
+            kind: CatalogObjectKind::Column,
+            name: identifier("label"),
+            definition: b"varchar(32)".to_vec(),
+            attributes: BTreeMap::from([
+                ("table_name".into(), serde_json::json!("items")),
+                ("ordinal".into(), serde_json::json!(2)),
+                ("default".into(), serde_json::Value::Null),
+                ("nullable".into(), serde_json::json!(false)),
+                ("data_type".into(), serde_json::json!("varchar")),
+                ("column_type".into(), serde_json::json!("varchar(32)")),
+                (
+                    "mysql_ddl_type".into(),
+                    serde_json::to_value(MySqlColumnType::Character {
+                        name: "varchar".into(),
+                        length: 32,
+                    })
+                    .unwrap(),
+                ),
+                ("character_set".into(), serde_json::json!("utf8mb4")),
+                ("collation".into(), serde_json::json!("utf8mb4_general_ci")),
+                ("extra".into(), serde_json::json!("")),
+                ("generation_expression".into(), serde_json::json!("")),
+            ]),
+        });
+        source.catalog.namespaces[0]
+            .objects
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        source.snapshot_evidence.catalog_fingerprint =
+            mysql_catalog_fingerprint(&source.catalog).unwrap();
+        let source_visibility = mysql_visibility(&source);
+        let target = postgres_snapshot("postgres://target/app", false);
+        let mapping = CrossDialectMapping {
+            schema_version: CROSS_DIALECT_MAPPING_SCHEMA_VERSION,
+            source_dialect: ConversionDialect::MySql,
+            target_dialect: ConversionDialect::PostgreSql,
+            target_defaults: CrossDialectTargetDefaults::PostgreSql {
+                text_collation: QualifiedIdentifier {
+                    namespace: identifier("pg_catalog"),
+                    name: identifier("C"),
+                },
+            },
+            tables: vec![CrossDialectTableMapping {
+                source: table("app", "items"),
+                target: table("public", "items"),
+            }],
+        };
+
+        let reviewed =
+            build_mysql_to_postgres_plan(&source, &source_visibility, &target, &mapping).unwrap();
+        assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+        let finding = reviewed
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .find(|object| object.code == UnsupportedObjectCode::CrossDialectTextCollation)
+            .unwrap();
+        assert!(!finding.required_semantics);
+        assert!(finding.reason.contains("app.items.label"));
+        assert!(finding.reason.contains("utf8mb4_general_ci"));
+        assert!(finding.reason.contains("pg_catalog.C"));
+        assert!(finding
+            .reason
+            .contains("comparison, sort, and uniqueness behavior may differ"));
     }
 
     #[test]

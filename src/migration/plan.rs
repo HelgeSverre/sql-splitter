@@ -18,7 +18,7 @@ use super::mysql_visibility::{
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 21;
+pub const PLAN_SCHEMA_VERSION: u16 = 22;
 pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
     MigrationConversionPolicy::same_dialect_exact(ConversionDialect::MySql);
 pub const POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
@@ -452,6 +452,7 @@ unsupported_object_codes! {
     MySqlFreezeEvidence => "mysql_freeze_evidence",
     MySqlAutoIncrementConsistency => "mysql_auto_increment_consistency",
     CrossDialectPerformanceIndex => "cross_dialect_performance_index",
+    CrossDialectTextCollation => "cross_dialect_text_collation",
 }
 
 impl UnsupportedObjectCode {
@@ -463,6 +464,7 @@ impl UnsupportedObjectCode {
                 | Self::RoutineAcl
                 | Self::DefaultPrivileges
                 | Self::CrossDialectPerformanceIndex
+                | Self::CrossDialectTextCollation
         )
     }
 }

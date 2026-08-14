@@ -3,7 +3,7 @@
 Implementation Phase 8 adds two same-dialect target modes. It does not make
 the current empty-target executor destructive by default.
 
-Serialization uses plan schema v21 and target-protection evidence schema v2.
+Serialization uses plan schema v22 and target-protection evidence schema v2.
 Older artifacts fail at their typed version boundaries.
 
 1. **Warm merge** preserves target-only rows and inserts source rows whose
