@@ -4436,11 +4436,11 @@ fn decimal_value(bytes: &[u8], scale: i32) -> ConnectionResult<DbValue> {
         .trim_start_matches('0')
         .to_string();
     let mut coefficient = if digits.is_empty() {
-        vec![0]
+        vec![b'0']
     } else {
         digits.into_bytes()
     };
-    if negative && coefficient != [0] {
+    if negative && coefficient != b"0" {
         coefficient.insert(0, b'-');
     }
     Ok(DbValue::Decimal { coefficient, scale })
@@ -9132,6 +9132,26 @@ mod tests {
         assert_eq!(render_mysql_decimal(b"0", 4).unwrap(), b"0.0000");
         assert!(render_mysql_decimal(b"1.2", 1).is_err());
         assert!(render_mysql_decimal(b"1", -1).is_err());
+    }
+
+    #[test]
+    fn mysql_decimal_decode_canonicalizes_zero_as_ascii() {
+        for input in [b"0.00".as_slice(), b"-0.00", b"+000.00"] {
+            assert_eq!(
+                decimal_value(input, 2).unwrap(),
+                DbValue::Decimal {
+                    coefficient: b"0".to_vec(),
+                    scale: 2,
+                }
+            );
+        }
+        assert_eq!(
+            decimal_value(b"001.20", 2).unwrap(),
+            DbValue::Decimal {
+                coefficient: b"120".to_vec(),
+                scale: 2,
+            }
+        );
     }
 
     #[test]
