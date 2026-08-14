@@ -4491,6 +4491,7 @@ fn table_contracts(
     let mut contracts = BTreeMap::new();
     for namespace in &catalog.namespaces {
         let mut columns_by_table = BTreeMap::<String, BTreeMap<String, MySqlReadColumn>>::new();
+        let mut unsupported_tables = BTreeSet::new();
         for object in namespace
             .objects
             .iter()
@@ -4508,19 +4509,18 @@ fn table_contracts(
                 })?;
             let meta = column_meta(object)
                 .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
-            let data_type = serde_json::from_value(
-                object
-                    .attributes
-                    .get("mysql_ddl_type")
-                    .cloned()
-                    .ok_or_else(|| {
-                        ConnectionError::InvalidRequest(format!(
-                            "MySQL column {} has no typed value contract",
-                            object.id
-                        ))
-                    })?,
-            )
-            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            let data_type = object.attributes.get("mysql_ddl_type").ok_or_else(|| {
+                ConnectionError::InvalidRequest(format!(
+                    "MySQL column {} has no typed value contract",
+                    object.id
+                ))
+            })?;
+            if data_type.is_null() {
+                unsupported_tables.insert(table_name.to_owned());
+                continue;
+            }
+            let data_type = serde_json::from_value(data_type.clone())
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
             let previous = columns_by_table
                 .entry(table_name.into())
                 .or_default()
@@ -4540,6 +4540,9 @@ fn table_contracts(
             .iter()
             .filter(|object| object.kind == CatalogObjectKind::Table)
         {
+            if unsupported_tables.contains(table.name.as_str()) {
+                continue;
+            }
             let Some(key_value) = table.attributes.get("resumable_key") else {
                 continue;
             };
@@ -8420,6 +8423,8 @@ mod tests {
         column
             .attributes
             .insert("mysql_ddl_type".into(), serde_json::Value::Null);
+
+        assert!(table_contracts(&catalog).unwrap().is_empty());
 
         let error = mysql_to_postgres_table_conversion_policy(
             &catalog,
