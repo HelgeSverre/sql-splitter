@@ -38,11 +38,12 @@ use super::connection::{
 };
 use super::conversion::{
     cross_dialect_target_key_name, derive_postgres_to_mysql_column, ConversionDialect,
-    CrossDialectKeyKind, CrossDialectResumableKey, CrossDialectTargetTableContract,
-    CrossDialectTargetType, MySqlTargetEngine, PostgresTargetPersistence, PostgresTargetType,
-    QualifiedIdentifier, RowConversionError, RowConversionPolicy, TableConversionPolicy,
-    TargetCheckConstraint, TimestampBound, TimestampSemantics, POSTGRES_TIMESTAMP_RANGE,
-    POSTGRES_TIME_MAXIMUM_NANOS, POSTGRES_TIME_MINIMUM_NANOS, ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+    CrossDialectKeyKind, CrossDialectPostgresIdentity, CrossDialectResumableKey,
+    CrossDialectTargetTableContract, CrossDialectTargetType, MySqlTargetEngine,
+    PostgresTargetPersistence, PostgresTargetType, QualifiedIdentifier, RowConversionError,
+    RowConversionPolicy, TableConversionPolicy, TargetCheckConstraint, TimestampBound,
+    TimestampSemantics, POSTGRES_TIMESTAMP_RANGE, POSTGRES_TIME_MAXIMUM_NANOS,
+    POSTGRES_TIME_MINIMUM_NANOS, ROW_TYPE_CONVERSION_SCHEMA_VERSION,
 };
 use super::model::{
     CatalogDependency, CatalogNamespace, CatalogObject, CatalogObjectKind, ColumnMeta, DbValue,
@@ -1513,6 +1514,13 @@ pub enum PostgresConversionTableState {
     Different,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresCrossDialectIdentityState {
+    Absent,
+    Exact,
+    Different,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct PostgresConversionTableSignature {
     owner: String,
@@ -1582,6 +1590,7 @@ fn postgres_temp_relation_identity(
 fn postgres_conversion_table_signature(
     client: &mut impl postgres::GenericClient,
     table_oid: u32,
+    normalize_identity_defaults: bool,
 ) -> ConnectionResult<PostgresConversionTableSignature> {
     let relation = client
         .query_one(
@@ -1589,10 +1598,15 @@ fn postgres_conversion_table_signature(
             &[&table_oid],
         )
         .map_err(database_error)?;
+    let default_expression = if normalize_identity_defaults {
+        "CASE WHEN a.attidentity<>'' THEN NULL ELSE pg_get_expr(ad.adbin,ad.adrelid,false) END"
+    } else {
+        "pg_get_expr(ad.adbin,ad.adrelid,false)"
+    };
     let columns = postgres_json_signature_rows(
         client,
         table_oid,
-        "SELECT jsonb_build_object('name',a.attname,'ordinal',a.attnum,'type',pg_catalog.format_type(a.atttypid,a.atttypmod),'not_null',a.attnotnull,'identity',a.attidentity::text,'generated',a.attgenerated::text,'collation_schema',cn.nspname,'collation',coll.collname,'default',pg_get_expr(ad.adbin,ad.adrelid,false))::text FROM pg_attribute a LEFT JOIN pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum LEFT JOIN pg_collation coll ON coll.oid=a.attcollation LEFT JOIN pg_namespace cn ON cn.oid=coll.collnamespace WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
+        &format!("SELECT jsonb_build_object('name',a.attname,'ordinal',a.attnum,'type',pg_catalog.format_type(a.atttypid,a.atttypmod),'not_null',a.attnotnull,'identity',a.attidentity::text,'generated',a.attgenerated::text,'collation_schema',cn.nspname,'collation',coll.collname,'default',{default_expression})::text FROM pg_attribute a LEFT JOIN pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum LEFT JOIN pg_collation coll ON coll.oid=a.attcollation LEFT JOIN pg_namespace cn ON cn.oid=coll.collnamespace WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum"),
     )?;
     let constraints = postgres_json_signature_rows(
         client,
@@ -1626,6 +1640,94 @@ fn postgres_json_signature_rows(
         .query(sql, &[&table_oid])
         .map_err(database_error)
         .map(|rows| rows.into_iter().map(|row| row.get(0)).collect())
+}
+
+fn cross_dialect_identity_sequence(
+    identity: &CrossDialectPostgresIdentity,
+) -> ConnectionResult<PostgresSequence> {
+    identity
+        .validate()
+        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+    Ok(PostgresSequence {
+        catalog_object_id: format!(
+            "cross-dialect-identity-sequence:{}:{}",
+            identity.sequence.namespace, identity.sequence.name
+        ),
+        namespace: identity.sequence.namespace.clone(),
+        name: identity.sequence.name.clone(),
+        persistence: "p".into(),
+        data_type: identity.data_type.as_str().into(),
+        start_value: 1,
+        increment: 1,
+        minimum_value: 1,
+        maximum_value: identity.data_type.maximum_value(),
+        cache_size: 1,
+        cycle: false,
+        last_value: identity.next_value,
+        is_called: false,
+        ownership: Some(PostgresSequenceOwnership {
+            table: identity.target_table.clone(),
+            column: identity.target_column.clone(),
+            kind: PostgresSequenceOwnershipKind::IdentityByDefault,
+        }),
+    })
+}
+
+fn cross_dialect_identity_statement(identity: &CrossDialectPostgresIdentity) -> String {
+    format!(
+        "ALTER TABLE {}.{} ALTER COLUMN {} ADD GENERATED BY DEFAULT AS IDENTITY (SEQUENCE NAME {}.{} INCREMENT BY 1 MINVALUE 1 MAXVALUE {} START WITH 1 CACHE 1 NO CYCLE)",
+        quote_identifier(&identity.target_table.namespace),
+        quote_identifier(&identity.target_table.name),
+        quote_identifier(&identity.target_column),
+        quote_identifier(&identity.sequence.namespace),
+        quote_identifier(&identity.sequence.name),
+        identity.data_type.maximum_value()
+    )
+}
+
+fn inspect_cross_dialect_identity(
+    client: &mut impl postgres::GenericClient,
+    identity: &CrossDialectPostgresIdentity,
+) -> ConnectionResult<PostgresCrossDialectIdentityState> {
+    identity
+        .validate()
+        .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+    let rows = client
+        .query(
+            "SELECT a.attidentity::text, pg_catalog.format_type(a.atttypid,a.atttypmod), ad.oid IS NOT NULL FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid LEFT JOIN pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind='r' AND a.attname=$3 AND a.attnum>0 AND NOT a.attisdropped",
+            &[&identity.target_table.namespace.as_str(), &identity.target_table.name.as_str(), &identity.target_column.as_str()],
+        )
+        .map_err(database_error)?;
+    let [column] = rows.as_slice() else {
+        return Ok(PostgresCrossDialectIdentityState::Different);
+    };
+    let sequence = cross_dialect_identity_sequence(identity)?;
+    let sequence_state = inspect_sequence(client, &sequence)?;
+    let identity_mode: String = column.get(0);
+    let data_type: String = column.get(1);
+    let has_default: bool = column.get(2);
+    if identity_mode.is_empty() && !has_default && sequence_state == PostgresSequenceState::Absent {
+        return Ok(PostgresCrossDialectIdentityState::Absent);
+    }
+    if identity_mode != "d"
+        || data_type != identity.data_type.as_str()
+        || sequence_state != PostgresSequenceState::ExactState
+    {
+        return Ok(PostgresCrossDialectIdentityState::Different);
+    }
+    let owner_acl = client
+        .query_one(
+            "SELECT r.rolname=current_user, c.relacl IS NULL FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind='S'",
+            &[&identity.sequence.namespace.as_str(), &identity.sequence.name.as_str()],
+        )
+        .map_err(database_error)?;
+    Ok(
+        if owner_acl.get::<_, bool>(0) && owner_acl.get::<_, bool>(1) {
+            PostgresCrossDialectIdentityState::Exact
+        } else {
+            PostgresCrossDialectIdentityState::Different
+        },
+    )
 }
 
 impl PostgresTargetFactory {
@@ -1767,13 +1869,14 @@ impl PostgresTargetFactory {
         if actual_persistence != "p" {
             return Ok(PostgresConversionTableState::Different);
         }
-        let actual_signature = match postgres_conversion_table_signature(&mut client, actual_oid) {
-            Ok(signature) => signature,
-            Err(ConnectionError::InvalidRequest(_)) => {
-                return Ok(PostgresConversionTableState::Different);
-            }
-            Err(error) => return Err(error),
-        };
+        let actual_signature =
+            match postgres_conversion_table_signature(&mut client, actual_oid, false) {
+                Ok(signature) => signature,
+                Err(ConnectionError::InvalidRequest(_)) => {
+                    return Ok(PostgresConversionTableState::Different);
+                }
+                Err(error) => return Err(error),
+            };
         let mut transaction = client.transaction().map_err(database_error)?;
         let shadow_name = postgres_conversion_shadow_name(policy)?;
         let mut shadow_policy = policy.clone();
@@ -1797,7 +1900,8 @@ impl PostgresTargetFactory {
                 "PostgreSQL conversion shadow table is not temporary".into(),
             ));
         }
-        let shadow_signature = postgres_conversion_table_signature(&mut transaction, shadow_oid)?;
+        let shadow_signature =
+            postgres_conversion_table_signature(&mut transaction, shadow_oid, false)?;
         transaction.rollback().map_err(database_error)?;
         self.cancellation.check()?;
         Ok(if actual_signature == shadow_signature {
@@ -1841,11 +1945,150 @@ impl PostgresTargetFactory {
         Ok(())
     }
 
+    pub fn inspect_cross_dialect_identity(
+        &self,
+        identity: &CrossDialectPostgresIdentity,
+    ) -> ConnectionResult<PostgresCrossDialectIdentityState> {
+        let (mut client, _registration) = self.controlled_connect()?;
+        let state = inspect_cross_dialect_identity(&mut client, identity)?;
+        self.cancellation.check()?;
+        Ok(state)
+    }
+
+    /// Attach one reviewed identity and restore its exact next generated value.
+    /// The caller must persist Prepared before invoking this method.
+    pub fn restore_cross_dialect_identity(
+        &self,
+        identity: &CrossDialectPostgresIdentity,
+    ) -> ConnectionResult<PostgresCrossDialectIdentityState> {
+        match self.inspect_cross_dialect_identity(identity)? {
+            PostgresCrossDialectIdentityState::Exact => {
+                return Ok(PostgresCrossDialectIdentityState::Exact);
+            }
+            PostgresCrossDialectIdentityState::Different => {
+                return Err(ConnectionError::InvalidRequest(
+                    "PostgreSQL cross-dialect identity has different semantics".into(),
+                ));
+            }
+            PostgresCrossDialectIdentityState::Absent => {}
+        }
+        let (mut client, _registration) = self.controlled_connect()?;
+        let mut transaction = client.transaction().map_err(database_error)?;
+        if let Err(cancelled) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(cancelled);
+        }
+        transaction
+            .batch_execute(&cross_dialect_identity_statement(identity))
+            .map_err(database_error)?;
+        let qualified_name =
+            qualified_regclass_name(&identity.sequence.namespace, &identity.sequence.name);
+        transaction
+            .query_one(
+                "SELECT pg_catalog.setval($1::text::regclass, $2, false)",
+                &[&qualified_name, &identity.next_value],
+            )
+            .map_err(database_error)?;
+        if inspect_cross_dialect_identity(&mut transaction, identity)?
+            != PostgresCrossDialectIdentityState::Exact
+        {
+            transaction.rollback().map_err(database_error)?;
+            return Err(ConnectionError::InvalidRequest(
+                "PostgreSQL cross-dialect identity restore produced a different effect".into(),
+            ));
+        }
+        if let Err(cancelled) = self.cancellation.check() {
+            transaction.rollback().map_err(database_error)?;
+            return Err(cancelled);
+        }
+        transaction
+            .commit()
+            .map_err(|error| ConnectionError::CommitOutcomeUnknown(error.to_string()))?;
+        let state = self.inspect_cross_dialect_identity(identity)?;
+        if state != PostgresCrossDialectIdentityState::Exact {
+            return Err(ConnectionError::InvalidRequest(
+                "PostgreSQL cross-dialect identity is not exact after commit".into(),
+            ));
+        }
+        Ok(state)
+    }
+
+    pub(crate) fn inspect_conversion_table_with_identities(
+        &self,
+        policy: &TableConversionPolicy,
+        identities: &[CrossDialectPostgresIdentity],
+    ) -> ConnectionResult<PostgresConversionTableState> {
+        if identities.iter().any(|identity| {
+            identity.target_table != policy.target_table
+                || !policy
+                    .row_policy
+                    .columns
+                    .iter()
+                    .any(|column| column.target.name == identity.target_column)
+        }) {
+            return Err(ConnectionError::InvalidRequest(
+                "PostgreSQL cross-dialect identity does not match its table policy".into(),
+            ));
+        }
+        let (mut client, _registration) = self.controlled_connect()?;
+        let Some((actual_oid, actual_persistence)) =
+            postgres_relation_identity(&mut client, &policy.target_table)?
+        else {
+            return Ok(PostgresConversionTableState::Absent);
+        };
+        if actual_persistence != "p" {
+            return Ok(PostgresConversionTableState::Different);
+        }
+        let actual_signature = postgres_conversion_table_signature(&mut client, actual_oid, true)?;
+        let mut transaction = client.transaction().map_err(database_error)?;
+        let shadow_name = postgres_conversion_shadow_name(policy)?;
+        let shadow_table = QualifiedTable {
+            namespace: Identifier::new("pg_temp")
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+            name: shadow_name,
+        };
+        let mut shadow_policy = policy.clone();
+        shadow_policy.target_table = shadow_table.clone();
+        transaction
+            .batch_execute(
+                &render_postgres_conversion_create_table(&shadow_policy)
+                    .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?,
+            )
+            .map_err(database_error)?;
+        for identity in identities {
+            let mut shadow_identity = identity.clone();
+            shadow_identity.target_table = shadow_table.clone();
+            shadow_identity.sequence.namespace = Identifier::new("pg_temp")
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            transaction
+                .batch_execute(&cross_dialect_identity_statement(&shadow_identity))
+                .map_err(database_error)?;
+        }
+        let (shadow_oid, shadow_persistence) =
+            postgres_temp_relation_identity(&mut transaction, &shadow_table.name)?.ok_or_else(
+                || ConnectionError::Database("PostgreSQL shadow table is absent".into()),
+            )?;
+        if shadow_persistence != "t" {
+            return Err(ConnectionError::Database(
+                "PostgreSQL conversion shadow table is not temporary".into(),
+            ));
+        }
+        let shadow_signature =
+            postgres_conversion_table_signature(&mut transaction, shadow_oid, true)?;
+        transaction.rollback().map_err(database_error)?;
+        Ok(if actual_signature == shadow_signature {
+            PostgresConversionTableState::Exact
+        } else {
+            PostgresConversionTableState::Different
+        })
+    }
+
     /// Verify the complete reviewed cross-dialect PostgreSQL target inventory
     /// and return its stable policy fingerprint.
     pub fn verify_conversion_schema(
         &self,
         policies: &[TableConversionPolicy],
+        identities: &[CrossDialectPostgresIdentity],
     ) -> ConnectionResult<String> {
         let expected = policies
             .iter()
@@ -1887,9 +2130,26 @@ impl PostgresTargetFactory {
                 "PostgreSQL target is missing a reviewed conversion table".into(),
             ));
         }
+        let expected_sequences = identities
+            .iter()
+            .map(|identity| identity.sequence.clone())
+            .collect::<BTreeSet<_>>();
+        if expected_sequences.len() != identities.len() {
+            return Err(ConnectionError::InvalidRequest(
+                "PostgreSQL cross-dialect identities contain duplicate sequences".into(),
+            ));
+        }
         for namespace in &catalog.namespaces {
             for object in &namespace.objects {
                 if object.kind == CatalogObjectKind::Table {
+                    continue;
+                }
+                if object.kind == CatalogObjectKind::Sequence
+                    && expected_sequences.contains(&QualifiedIdentifier {
+                        namespace: namespace.name.clone(),
+                        name: object.name.clone(),
+                    })
+                {
                     continue;
                 }
                 let supported_kind = matches!(
@@ -1914,14 +2174,33 @@ impl PostgresTargetFactory {
             }
         }
         for policy in policies {
-            if self.inspect_conversion_table(policy)? != PostgresConversionTableState::Exact {
+            let table_identities = identities
+                .iter()
+                .filter(|identity| identity.target_table == policy.target_table)
+                .cloned()
+                .collect::<Vec<_>>();
+            if self.inspect_conversion_table_with_identities(policy, &table_identities)?
+                != PostgresConversionTableState::Exact
+            {
                 return Err(ConnectionError::InvalidRequest(format!(
                     "PostgreSQL conversion target table {}.{} is not exact",
                     policy.target_table.namespace, policy.target_table.name
                 )));
             }
         }
-        serde_json::to_vec(policies)
+        for identity in identities {
+            if self.inspect_cross_dialect_identity(identity)?
+                != PostgresCrossDialectIdentityState::Exact
+            {
+                return Err(ConnectionError::InvalidRequest(format!(
+                    "PostgreSQL conversion target identity {}.{}.{} is not exact",
+                    identity.target_table.namespace,
+                    identity.target_table.name,
+                    identity.target_column
+                )));
+            }
+        }
+        serde_json::to_vec(&(policies, identities))
             .map(|bytes| hex::encode(Sha256::digest(bytes)))
             .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))
     }
@@ -9207,6 +9486,55 @@ fn load_source_profile_contract(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::conversion::PostgresIdentityDataType;
+
+    fn cross_dialect_identity_fixture() -> CrossDialectPostgresIdentity {
+        CrossDialectPostgresIdentity {
+            source_table: QualifiedTable {
+                namespace: Identifier::new("source.schema").unwrap(),
+                name: Identifier::new("source\"table").unwrap(),
+            },
+            source_column: Identifier::new("source id").unwrap(),
+            target_table: QualifiedTable {
+                namespace: Identifier::new("target.schema").unwrap(),
+                name: Identifier::new("target\"table").unwrap(),
+            },
+            target_column: Identifier::new("target id").unwrap(),
+            sequence: QualifiedIdentifier {
+                namespace: Identifier::new("target.schema").unwrap(),
+                name: Identifier::new("identity\"sequence").unwrap(),
+            },
+            data_type: PostgresIdentityDataType::Integer,
+            next_value: 42,
+        }
+    }
+
+    #[test]
+    fn cross_dialect_identity_ddl_is_typed_and_quotes_every_identifier() {
+        let identity = cross_dialect_identity_fixture();
+        assert_eq!(
+            cross_dialect_identity_statement(&identity),
+            "ALTER TABLE \"target.schema\".\"target\"\"table\" ALTER COLUMN \"target id\" ADD GENERATED BY DEFAULT AS IDENTITY (SEQUENCE NAME \"target.schema\".\"identity\"\"sequence\" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1 NO CYCLE)"
+        );
+    }
+
+    #[test]
+    fn cross_dialect_identity_sequence_preserves_exact_next_value() {
+        let identity = cross_dialect_identity_fixture();
+        let sequence = cross_dialect_identity_sequence(&identity).unwrap();
+        assert_eq!(sequence.namespace, identity.sequence.namespace);
+        assert_eq!(sequence.name, identity.sequence.name);
+        assert_eq!(sequence.data_type, "integer");
+        assert_eq!(sequence.minimum_value, 1);
+        assert_eq!(sequence.maximum_value, i64::from(i32::MAX));
+        assert_eq!(sequence.last_value, 42);
+        assert!(!sequence.is_called);
+        assert!(matches!(
+            sequence.ownership,
+            Some(PostgresSequenceOwnership { table, column, kind: PostgresSequenceOwnershipKind::IdentityByDefault })
+                if table == identity.target_table && column == identity.target_column
+        ));
+    }
 
     #[test]
     fn assessment_outputs_must_be_distinct() {

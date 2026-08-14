@@ -107,6 +107,9 @@ fn selected_interruption() -> anyhow::Result<CrossDialectExecutionInterruption> 
         "table-effect-applied" => Ok(CrossDialectExecutionInterruption::TableEffectApplied),
         "chunk-prepared" => Ok(CrossDialectExecutionInterruption::ChunkPrepared),
         "chunk-effect-applied" => Ok(CrossDialectExecutionInterruption::ChunkEffectApplied),
+        "identity-prepared" => Ok(CrossDialectExecutionInterruption::IdentityPrepared),
+        "identity-effect-applied" => Ok(CrossDialectExecutionInterruption::IdentityEffectApplied),
+        "identity-committed" => Ok(CrossDialectExecutionInterruption::IdentityCommitted),
         "cancel-after-insert" => Ok(CrossDialectExecutionInterruption::CancelAfterInsert),
         "after-verification" => Ok(CrossDialectExecutionInterruption::AfterVerification),
         "after-postgres-fence-release" => {
@@ -344,6 +347,26 @@ fn connect_postgres(config: &PostgresEndpointConfig) -> anyhow::Result<Client> {
         });
     }
     Ok(pg.connect(connector)?)
+}
+
+#[cfg(feature = "migration-fault-injection")]
+fn assert_postgres_identity_next_value(config_path: &Path) -> anyhow::Result<()> {
+    let mut client = connect_postgres(&PostgresEndpointConfig::read(config_path)?)?;
+    let identity: String = client
+        .query_one(
+            "SELECT a.attidentity::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid WHERE n.nspname='public' AND c.relname='items_from_mysql' AND a.attname='id'",
+            &[],
+        )?
+        .get(0);
+    assert_eq!(identity, "d");
+    let inserted: i64 = client
+        .query_one(
+            "INSERT INTO public.items_from_mysql DEFAULT VALUES RETURNING id",
+            &[],
+        )?
+        .get(0);
+    assert_eq!(inserted, 42);
+    Ok(())
 }
 
 #[cfg(feature = "migration-fault-injection")]
@@ -629,7 +652,8 @@ fn live_mysql_to_postgres_resumes_selected_recovery_boundary() -> anyhow::Result
         &assertion_path,
     )?;
     assert!(report.copied_rows > 1);
-    assert_completed(&state_path)
+    assert_completed(&state_path)?;
+    assert_postgres_identity_next_value(&direct_target)
 }
 
 #[cfg(feature = "migration-fault-injection")]

@@ -18,7 +18,10 @@ use super::connection::{
     CancellationToken, ConnectionError, KeyTuple, KeysetPage, ReadSession, SourceConnectionFactory,
     TargetConnectionFactory,
 };
-use super::conversion::{ConversionDialect, MigrationConversionMode, TableConversionPolicy};
+use super::conversion::{
+    ConversionDialect, CrossDialectPostgresIdentity, MigrationConversionMode, TableConversionPolicy,
+};
+use super::cross_dialect::mysql_to_postgres_identity_contracts;
 use super::journal::{ConsistencyEvidence, MigrationStatus, OperationState, ResumeBinding};
 use super::model::{DbValue, Identifier, QualifiedTable, RowBatch, VendorCatalog};
 use super::mysql::{
@@ -34,8 +37,8 @@ use super::mysql_profile::{MySqlExternalFreezeAssertion, MySqlExternalFreezeAtte
 use super::plan::{OperationKind, PlanOperation, ReviewedPlan};
 use super::postgres::{
     catalog_fingerprint, postgres_tls_binding, PostgresConsistencyMode,
-    PostgresConversionTableState, PostgresEndpointConfig, PostgresSourceFactory,
-    PostgresTargetFactory,
+    PostgresConversionTableState, PostgresCrossDialectIdentityState, PostgresEndpointConfig,
+    PostgresSourceFactory, PostgresTargetFactory,
 };
 use super::postgres_fence::{
     attest_postgres_write_fence, postgres_write_fence_is_released, release_postgres_write_fence,
@@ -54,13 +57,25 @@ trait CrossDialectTarget: TargetConnectionFactory {
     fn inspect_cross_table(
         &self,
         policy: &TableConversionPolicy,
+        identities: &[CrossDialectPostgresIdentity],
     ) -> Result<CrossTableState, ConnectionError>;
 
     fn create_cross_table(&self, policy: &TableConversionPolicy) -> Result<(), ConnectionError>;
 
+    fn inspect_cross_identity(
+        &self,
+        identity: &CrossDialectPostgresIdentity,
+    ) -> Result<PostgresCrossDialectIdentityState, ConnectionError>;
+
+    fn restore_cross_identity(
+        &self,
+        identity: &CrossDialectPostgresIdentity,
+    ) -> Result<PostgresCrossDialectIdentityState, ConnectionError>;
+
     fn verify_cross_schema(
         &self,
         policies: &[TableConversionPolicy],
+        identities: &[CrossDialectPostgresIdentity],
     ) -> Result<String, ConnectionError>;
 }
 
@@ -68,7 +83,13 @@ impl CrossDialectTarget for MySqlTargetFactory {
     fn inspect_cross_table(
         &self,
         policy: &TableConversionPolicy,
+        identities: &[CrossDialectPostgresIdentity],
     ) -> Result<CrossTableState, ConnectionError> {
+        if !identities.is_empty() {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL target received unexpected PostgreSQL identity contracts".into(),
+            ));
+        }
         Ok(match self.inspect_conversion_table(policy)? {
             MySqlTableState::Absent => CrossTableState::Absent,
             MySqlTableState::Exact => CrossTableState::Exact,
@@ -80,10 +101,34 @@ impl CrossDialectTarget for MySqlTargetFactory {
         self.create_conversion_table(policy)
     }
 
+    fn inspect_cross_identity(
+        &self,
+        _identity: &CrossDialectPostgresIdentity,
+    ) -> Result<PostgresCrossDialectIdentityState, ConnectionError> {
+        Err(ConnectionError::InvalidRequest(
+            "MySQL target does not accept PostgreSQL identity operations".into(),
+        ))
+    }
+
+    fn restore_cross_identity(
+        &self,
+        _identity: &CrossDialectPostgresIdentity,
+    ) -> Result<PostgresCrossDialectIdentityState, ConnectionError> {
+        Err(ConnectionError::InvalidRequest(
+            "MySQL target does not accept PostgreSQL identity operations".into(),
+        ))
+    }
+
     fn verify_cross_schema(
         &self,
         policies: &[TableConversionPolicy],
+        identities: &[CrossDialectPostgresIdentity],
     ) -> Result<String, ConnectionError> {
+        if !identities.is_empty() {
+            return Err(ConnectionError::InvalidRequest(
+                "MySQL target received unexpected PostgreSQL identity contracts".into(),
+            ));
+        }
         self.verify_conversion_schema(policies)
     }
 }
@@ -92,8 +137,20 @@ impl CrossDialectTarget for PostgresTargetFactory {
     fn inspect_cross_table(
         &self,
         policy: &TableConversionPolicy,
+        identities: &[CrossDialectPostgresIdentity],
     ) -> Result<CrossTableState, ConnectionError> {
-        Ok(match self.inspect_conversion_table(policy)? {
+        let state = if identities.is_empty() {
+            self.inspect_conversion_table(policy)?
+        } else {
+            match self.inspect_conversion_table(policy)? {
+                PostgresConversionTableState::Exact => PostgresConversionTableState::Exact,
+                PostgresConversionTableState::Absent => PostgresConversionTableState::Absent,
+                PostgresConversionTableState::Different => {
+                    self.inspect_conversion_table_with_identities(policy, identities)?
+                }
+            }
+        };
+        Ok(match state {
             PostgresConversionTableState::Absent => CrossTableState::Absent,
             PostgresConversionTableState::Exact => CrossTableState::Exact,
             PostgresConversionTableState::Different => CrossTableState::Different,
@@ -104,11 +161,26 @@ impl CrossDialectTarget for PostgresTargetFactory {
         self.create_conversion_table(policy)
     }
 
+    fn inspect_cross_identity(
+        &self,
+        identity: &CrossDialectPostgresIdentity,
+    ) -> Result<PostgresCrossDialectIdentityState, ConnectionError> {
+        self.inspect_cross_dialect_identity(identity)
+    }
+
+    fn restore_cross_identity(
+        &self,
+        identity: &CrossDialectPostgresIdentity,
+    ) -> Result<PostgresCrossDialectIdentityState, ConnectionError> {
+        self.restore_cross_dialect_identity(identity)
+    }
+
     fn verify_cross_schema(
         &self,
         policies: &[TableConversionPolicy],
+        identities: &[CrossDialectPostgresIdentity],
     ) -> Result<String, ConnectionError> {
-        self.verify_conversion_schema(policies)
+        self.verify_conversion_schema(policies, identities)
     }
 }
 
@@ -128,6 +200,9 @@ enum CrossDialectInterruptionPoint {
     ChunkEffectApplied,
     CancelAfterInsert,
     NetworkCommitFault(u16),
+    IdentityPrepared,
+    IdentityEffectApplied,
+    IdentityCommitted,
     AfterVerification,
     AfterPostgresFenceRelease,
 }
@@ -142,6 +217,9 @@ pub enum CrossDialectExecutionInterruption {
     ChunkEffectApplied,
     CancelAfterInsert,
     NetworkCommitFault(u16),
+    IdentityPrepared,
+    IdentityEffectApplied,
+    IdentityCommitted,
     AfterVerification,
     AfterPostgresFenceRelease,
 }
@@ -158,6 +236,9 @@ impl From<CrossDialectExecutionInterruption> for CrossDialectInterruptionPoint {
             CrossDialectExecutionInterruption::NetworkCommitFault(port) => {
                 Self::NetworkCommitFault(port)
             }
+            CrossDialectExecutionInterruption::IdentityPrepared => Self::IdentityPrepared,
+            CrossDialectExecutionInterruption::IdentityEffectApplied => Self::IdentityEffectApplied,
+            CrossDialectExecutionInterruption::IdentityCommitted => Self::IdentityCommitted,
             CrossDialectExecutionInterruption::AfterVerification => Self::AfterVerification,
             CrossDialectExecutionInterruption::AfterPostgresFenceRelease => {
                 Self::AfterPostgresFenceRelease
@@ -1613,6 +1694,12 @@ struct CrossCopyContract {
     target_key_indexes: Vec<usize>,
 }
 
+#[derive(Debug, Clone)]
+struct CrossIdentityContract {
+    operation_id: String,
+    identity: CrossDialectPostgresIdentity,
+}
+
 struct CrossDialectExecutionRuntime<'a> {
     cancellation: &'a CancellationToken,
     page_limit: u32,
@@ -1720,6 +1807,92 @@ fn cross_dialect_contracts(reviewed: &ReviewedPlan) -> anyhow::Result<Vec<CrossC
     Ok(contracts)
 }
 
+fn cross_identity_contracts(
+    reviewed: &ReviewedPlan,
+    copy_contracts: &[CrossCopyContract],
+) -> anyhow::Result<Vec<CrossIdentityContract>> {
+    if reviewed.plan.conversion_policy.source_dialect() != ConversionDialect::MySql {
+        let has_identity_operation = reviewed.plan.operations.iter().any(|operation| {
+            matches!(
+                &operation.kind,
+                OperationKind::Vendor(name)
+                    if name == "restore_postgres_cross_dialect_identity"
+            )
+        });
+        if has_identity_operation {
+            return Err(anyhow!(
+                "PostgreSQL-source plan contains an unexpected target identity operation"
+            ));
+        }
+        return Ok(Vec::new());
+    }
+    let source_catalog = reviewed
+        .plan
+        .source_catalog
+        .as_ref()
+        .ok_or_else(|| anyhow!("cross-dialect plan has no source catalog"))?;
+    let policies = copy_contracts
+        .iter()
+        .map(|contract| contract.policy.clone())
+        .collect::<Vec<_>>();
+    let (expected, blockers) = mysql_to_postgres_identity_contracts(source_catalog, &policies)?;
+    if blockers.iter().any(|finding| finding.required_semantics) {
+        return Err(anyhow!(
+            "reviewed cross-dialect identity contract contains blocking source evidence"
+        ));
+    }
+    let operations = reviewed
+        .plan
+        .operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                &operation.kind,
+                OperationKind::Vendor(name)
+                    if name == "restore_postgres_cross_dialect_identity"
+            )
+        })
+        .collect::<Vec<_>>();
+    if operations.len() != expected.len() {
+        return Err(anyhow!(
+            "reviewed cross-dialect identity operation set is incomplete"
+        ));
+    }
+    let mut contracts = Vec::with_capacity(expected.len());
+    for identity in expected {
+        let copy = copy_contracts
+            .iter()
+            .find(|contract| contract.policy.source_table == identity.source_table)
+            .ok_or_else(|| anyhow!("cross-dialect identity has no copy contract"))?;
+        let matching = operations
+            .iter()
+            .filter(|operation| {
+                operation.table.as_ref() == Some(&identity.target_table)
+                    && operation.dependencies.len() == 1
+                    && operation.dependencies[0].as_str() == copy.copy_operation_id
+                    && operation.parameters.len() == 1
+                    && operation
+                        .parameters
+                        .get("postgres_cross_dialect_identity")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        .as_ref()
+                        == Some(&identity)
+            })
+            .collect::<Vec<_>>();
+        let [operation] = matching.as_slice() else {
+            return Err(anyhow!(
+                "reviewed cross-dialect identity has no exact durable operation"
+            ));
+        };
+        contracts.push(CrossIdentityContract {
+            operation_id: operation.id.to_string(),
+            identity,
+        });
+    }
+    contracts.sort_by(|left, right| left.identity.cmp(&right.identity));
+    Ok(contracts)
+}
+
 fn exact_policy_operation<'a>(
     operations: &'a [PlanOperation],
     kind: OperationKind,
@@ -1765,8 +1938,16 @@ fn execute_cross_dialect_journal(
         return Err(anyhow!("cross-dialect page limit must be positive"));
     }
     let contracts = cross_dialect_contracts(reviewed)?;
-    reconcile_cross_tables(target, journal, &contracts, &mut runtime)?;
+    let identity_contracts = cross_identity_contracts(reviewed, &contracts)?;
+    reconcile_cross_tables(
+        target,
+        journal,
+        &contracts,
+        &identity_contracts,
+        &mut runtime,
+    )?;
     copy_cross_tables(reviewed, reader, target, journal, &contracts, &mut runtime)?;
+    reconcile_cross_identities(target, journal, &identity_contracts, &mut runtime)?;
     (runtime.require_source_consistency)()?;
     if journal.projection().status == MigrationStatus::Running {
         journal.transition_status(MigrationStatus::Verifying)?;
@@ -1780,7 +1961,11 @@ fn execute_cross_dialect_journal(
         .iter()
         .map(|contract| contract.policy.clone())
         .collect::<Vec<_>>();
-    let schema_fingerprint = target.verify_cross_schema(&policies)?;
+    let identities = identity_contracts
+        .iter()
+        .map(|contract| contract.identity.clone())
+        .collect::<Vec<_>>();
+    let schema_fingerprint = target.verify_cross_schema(&policies, &identities)?;
     let verify_schema = reviewed
         .plan
         .operations
@@ -1794,14 +1979,115 @@ fn execute_cross_dialect_journal(
     Ok(())
 }
 
-fn reconcile_cross_tables(
+fn reconcile_cross_identities(
     target: &dyn CrossDialectTarget,
     journal: &mut AppendJournal,
-    contracts: &[CrossCopyContract],
+    contracts: &[CrossIdentityContract],
     runtime: &mut CrossDialectExecutionRuntime<'_>,
 ) -> anyhow::Result<()> {
     for contract in contracts {
         (runtime.require_source_consistency)()?;
+        let operation_id = contract.operation_id.as_str();
+        let mut state = operation_state(journal, operation_id)?;
+        if state == OperationState::Pending {
+            journal.prepare_operations_atomic([operation_id])?;
+            state = OperationState::Prepared;
+            interrupt_cross_dialect_if(
+                runtime.interruption,
+                CrossDialectInterruptionPoint::IdentityPrepared,
+            )?;
+        }
+        if state == OperationState::Running {
+            journal.transition_operation(operation_id, OperationState::Prepared)?;
+            state = OperationState::Prepared;
+        }
+        if state == OperationState::Prepared {
+            match target.inspect_cross_identity(&contract.identity)? {
+                PostgresCrossDialectIdentityState::Absent => {
+                    (runtime.require_source_consistency)()?;
+                    if let Err(error) = target.restore_cross_identity(&contract.identity) {
+                        match target.inspect_cross_identity(&contract.identity)? {
+                            PostgresCrossDialectIdentityState::Exact => {}
+                            PostgresCrossDialectIdentityState::Absent => {
+                                return Err(anyhow!(
+                                    "PostgreSQL identity restore outcome is absent; durable intent remains Prepared: {error}"
+                                ));
+                            }
+                            PostgresCrossDialectIdentityState::Different => {
+                                return require_manual(
+                                    journal,
+                                    format!(
+                                        "PostgreSQL identity restore produced a different effect: {error}"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    interrupt_cross_dialect_if(
+                        runtime.interruption,
+                        CrossDialectInterruptionPoint::IdentityEffectApplied,
+                    )?;
+                }
+                PostgresCrossDialectIdentityState::Exact => {}
+                PostgresCrossDialectIdentityState::Different => {
+                    return require_manual(
+                        journal,
+                        "prepared PostgreSQL identity has different semantics".into(),
+                    );
+                }
+            }
+            if target.inspect_cross_identity(&contract.identity)?
+                != PostgresCrossDialectIdentityState::Exact
+            {
+                return require_manual(
+                    journal,
+                    "PostgreSQL identity is not exact after restore".into(),
+                );
+            }
+            journal.transition_operation(operation_id, OperationState::Committed)?;
+            state = OperationState::Committed;
+            interrupt_cross_dialect_if(
+                runtime.interruption,
+                CrossDialectInterruptionPoint::IdentityCommitted,
+            )?;
+        }
+        if state == OperationState::Committed {
+            if target.inspect_cross_identity(&contract.identity)?
+                != PostgresCrossDialectIdentityState::Exact
+            {
+                return require_manual(journal, "committed PostgreSQL identity drifted".into());
+            }
+            journal.transition_operation(operation_id, OperationState::Verified)?;
+            state = OperationState::Verified;
+        }
+        if state != OperationState::Verified
+            || target.inspect_cross_identity(&contract.identity)?
+                != PostgresCrossDialectIdentityState::Exact
+        {
+            return require_manual(journal, "verified PostgreSQL identity drifted".into());
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_cross_tables(
+    target: &dyn CrossDialectTarget,
+    journal: &mut AppendJournal,
+    contracts: &[CrossCopyContract],
+    identity_contracts: &[CrossIdentityContract],
+    runtime: &mut CrossDialectExecutionRuntime<'_>,
+) -> anyhow::Result<()> {
+    for contract in contracts {
+        (runtime.require_source_consistency)()?;
+        let mut identities = Vec::new();
+        for identity in identity_contracts
+            .iter()
+            .filter(|identity| identity.identity.target_table == contract.policy.target_table)
+        {
+            if operation_state(journal, &identity.operation_id)? != OperationState::Pending {
+                identities.push(identity.identity.clone());
+            }
+        }
         let operation_id = contract.create_operation_id.as_str();
         let mut state = operation_state(journal, operation_id)?;
         if state == OperationState::Pending {
@@ -1817,7 +2103,7 @@ fn reconcile_cross_tables(
             state = OperationState::Prepared;
         }
         if state == OperationState::Prepared {
-            match target.inspect_cross_table(&contract.policy)? {
+            match target.inspect_cross_table(&contract.policy, &identities)? {
                 CrossTableState::Absent => {
                     (runtime.require_source_consistency)()?;
                     target.create_cross_table(&contract.policy)?;
@@ -1834,7 +2120,8 @@ fn reconcile_cross_tables(
                     );
                 }
             }
-            if target.inspect_cross_table(&contract.policy)? != CrossTableState::Exact {
+            if target.inspect_cross_table(&contract.policy, &identities)? != CrossTableState::Exact
+            {
                 return require_manual(
                     journal,
                     "cross-dialect target table is not exact after create".into(),
@@ -1844,7 +2131,8 @@ fn reconcile_cross_tables(
             state = OperationState::Committed;
         }
         if state == OperationState::Committed {
-            if target.inspect_cross_table(&contract.policy)? != CrossTableState::Exact {
+            if target.inspect_cross_table(&contract.policy, &identities)? != CrossTableState::Exact
+            {
                 return require_manual(
                     journal,
                     "committed cross-dialect target table drifted".into(),
@@ -1854,7 +2142,7 @@ fn reconcile_cross_tables(
             state = OperationState::Verified;
         }
         if state != OperationState::Verified
-            || target.inspect_cross_table(&contract.policy)? != CrossTableState::Exact
+            || target.inspect_cross_table(&contract.policy, &identities)? != CrossTableState::Exact
         {
             return require_manual(
                 journal,
@@ -2219,7 +2507,11 @@ fn verify_cross_target_from_journal(
         .iter()
         .map(|contract| contract.policy.clone())
         .collect::<Vec<_>>();
-    target.verify_cross_schema(&policies)?;
+    let identities = cross_identity_contracts(journal.reviewed_plan(), contracts)?
+        .into_iter()
+        .map(|contract| contract.identity)
+        .collect::<Vec<_>>();
+    target.verify_cross_schema(&policies, &identities)?;
     Ok(())
 }
 
@@ -2480,7 +2772,8 @@ mod tests {
         WriteSession,
     };
     use crate::migration::cross_dialect::tests::{
-        mysql_to_postgres_reviewed_plan, postgres_to_mysql_reviewed_plan,
+        mysql_to_postgres_identity_reviewed_plan, mysql_to_postgres_reviewed_plan,
+        postgres_to_mysql_reviewed_plan,
     };
     use crate::migration::mysql_profile::{
         MySqlDdlFreezeMechanism, MySqlDmlFreezeMechanism, MySqlFreezeAttestationStatus,
@@ -2520,6 +2813,7 @@ mod tests {
     #[derive(Clone)]
     struct TestTarget {
         expected_policy: TableConversionPolicy,
+        expected_identity: Option<CrossDialectPostgresIdentity>,
         state: Arc<Mutex<TestTargetState>>,
     }
 
@@ -2527,6 +2821,8 @@ mod tests {
         created: bool,
         different_schema: bool,
         commit_unknown_after_apply: bool,
+        identity_state: PostgresCrossDialectIdentityState,
+        identity_unknown_after_apply: bool,
         rows: RowBatch,
     }
 
@@ -2622,7 +2918,14 @@ mod tests {
         fn inspect_cross_table(
             &self,
             policy: &TableConversionPolicy,
+            identities: &[CrossDialectPostgresIdentity],
         ) -> Result<CrossTableState, ConnectionError> {
+            let expected_identities = self.expected_identity.iter().cloned().collect::<Vec<_>>();
+            if !identities.is_empty() && identities != expected_identities {
+                return Err(ConnectionError::InvalidRequest(
+                    "test target received substituted table identities".into(),
+                ));
+            }
             let state = self.state.lock().map_err(|_| {
                 ConnectionError::Database("test target state lock is poisoned".into())
             })?;
@@ -2653,18 +2956,59 @@ mod tests {
             Ok(())
         }
 
+        fn inspect_cross_identity(
+            &self,
+            identity: &CrossDialectPostgresIdentity,
+        ) -> Result<PostgresCrossDialectIdentityState, ConnectionError> {
+            if self.expected_identity.as_ref() != Some(identity) {
+                return Err(ConnectionError::InvalidRequest(
+                    "test target received a substituted identity".into(),
+                ));
+            }
+            self.state
+                .lock()
+                .map(|state| state.identity_state)
+                .map_err(|_| ConnectionError::Database("test target lock is poisoned".into()))
+        }
+
+        fn restore_cross_identity(
+            &self,
+            identity: &CrossDialectPostgresIdentity,
+        ) -> Result<PostgresCrossDialectIdentityState, ConnectionError> {
+            if self.expected_identity.as_ref() != Some(identity) {
+                return Err(ConnectionError::InvalidRequest(
+                    "test target received a substituted identity".into(),
+                ));
+            }
+            let mut state = self.state.lock().map_err(|_| {
+                ConnectionError::Database("test target state lock is poisoned".into())
+            })?;
+            state.identity_state = PostgresCrossDialectIdentityState::Exact;
+            if state.identity_unknown_after_apply {
+                Err(ConnectionError::CommitOutcomeUnknown(
+                    "injected identity acknowledgement loss".into(),
+                ))
+            } else {
+                Ok(PostgresCrossDialectIdentityState::Exact)
+            }
+        }
+
         fn verify_cross_schema(
             &self,
             policies: &[TableConversionPolicy],
+            identities: &[CrossDialectPostgresIdentity],
         ) -> Result<String, ConnectionError> {
-            if policies != [self.expected_policy.clone()]
-                || self.inspect_cross_table(&self.expected_policy)? != CrossTableState::Exact
+            let expected_identities = self.expected_identity.iter().cloned().collect::<Vec<_>>();
+            if identities != expected_identities
+                || policies != [self.expected_policy.clone()]
+                || self.inspect_cross_table(&self.expected_policy, identities)?
+                    != CrossTableState::Exact
             {
                 return Err(ConnectionError::InvalidRequest(
                     "test target schema differs".into(),
                 ));
             }
-            serde_json::to_vec(policies)
+            serde_json::to_vec(&(policies, identities))
                 .map(|bytes| hex::encode(Sha256::digest(bytes)))
                 .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))
         }
@@ -2823,13 +3167,27 @@ mod tests {
         );
         TestTarget {
             expected_policy: policy,
+            expected_identity: None,
             state: Arc::new(Mutex::new(TestTargetState {
                 created: false,
                 different_schema: false,
                 commit_unknown_after_apply,
+                identity_state: PostgresCrossDialectIdentityState::Absent,
+                identity_unknown_after_apply: false,
                 rows,
             })),
         }
+    }
+
+    fn identity_target(
+        policy: TableConversionPolicy,
+        identity: CrossDialectPostgresIdentity,
+        unknown_after_apply: bool,
+    ) -> TestTarget {
+        let mut target = target(policy, false);
+        target.expected_identity = Some(identity);
+        target.state.lock().unwrap().identity_unknown_after_apply = unknown_after_apply;
+        target
     }
 
     fn journal(reviewed: &ReviewedPlan, directory: &Path) -> AppendJournal {
@@ -2940,6 +3298,123 @@ mod tests {
         assert_eq!(committed.len(), 2);
         assert!(committed.iter().all(|chunk| chunk.row_count == 1));
         assert_eq!(target.state.lock().unwrap().rows.len(), 2);
+    }
+
+    #[test]
+    fn identity_effect_applied_before_journal_commit_resumes_exactly() {
+        let reviewed = mysql_to_postgres_identity_reviewed_plan(42);
+        let policy = cross_policies(&reviewed).unwrap().remove(0);
+        let copy_contracts = cross_dialect_contracts(&reviewed).unwrap();
+        let identity = cross_identity_contracts(&reviewed, &copy_contracts)
+            .unwrap()
+            .remove(0)
+            .identity;
+        let source = source_rows(&policy);
+        let target = identity_target(policy, identity.clone(), false);
+        let directory = private_tempdir();
+        let mut journal = journal(&reviewed, directory.path());
+        let cancellation = CancellationToken::default();
+        let mut require_consistency = || Ok(());
+
+        let error = execute_cross_dialect_journal(
+            &reviewed,
+            &mut reader(source.clone()),
+            &target,
+            &mut journal,
+            CrossDialectExecutionRuntime {
+                cancellation: &cancellation,
+                page_limit: 2,
+                require_source_consistency: &mut require_consistency,
+                interruption: Some(CrossDialectInterruptionPoint::IdentityEffectApplied),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("interruption"), "{error:#}");
+        let identity_operation = cross_identity_contracts(&reviewed, &copy_contracts)
+            .unwrap()
+            .remove(0)
+            .operation_id;
+        assert_eq!(
+            operation_state(&journal, &identity_operation).unwrap(),
+            OperationState::Prepared
+        );
+        assert_eq!(
+            target.inspect_cross_identity(&identity).unwrap(),
+            PostgresCrossDialectIdentityState::Exact
+        );
+
+        execute_cross_dialect_journal(
+            &reviewed,
+            &mut reader(source),
+            &target,
+            &mut journal,
+            CrossDialectExecutionRuntime {
+                cancellation: &cancellation,
+                page_limit: 2,
+                require_source_consistency: &mut require_consistency,
+                interruption: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            operation_state(&journal, &identity_operation).unwrap(),
+            OperationState::Verified
+        );
+        assert!(journal.projection().schema_verified);
+    }
+
+    #[test]
+    fn prepared_identity_with_third_state_requires_manual_reconciliation() {
+        let reviewed = mysql_to_postgres_identity_reviewed_plan(42);
+        let policy = cross_policies(&reviewed).unwrap().remove(0);
+        let copy_contracts = cross_dialect_contracts(&reviewed).unwrap();
+        let identity_contract = cross_identity_contracts(&reviewed, &copy_contracts)
+            .unwrap()
+            .remove(0);
+        let source = source_rows(&policy);
+        let target = identity_target(policy, identity_contract.identity, false);
+        let directory = private_tempdir();
+        let mut journal = journal(&reviewed, directory.path());
+        let cancellation = CancellationToken::default();
+        let mut require_consistency = || Ok(());
+
+        execute_cross_dialect_journal(
+            &reviewed,
+            &mut reader(source.clone()),
+            &target,
+            &mut journal,
+            CrossDialectExecutionRuntime {
+                cancellation: &cancellation,
+                page_limit: 2,
+                require_source_consistency: &mut require_consistency,
+                interruption: Some(CrossDialectInterruptionPoint::IdentityPrepared),
+            },
+        )
+        .unwrap_err();
+        target.state.lock().unwrap().identity_state = PostgresCrossDialectIdentityState::Different;
+
+        let error = execute_cross_dialect_journal(
+            &reviewed,
+            &mut reader(source),
+            &target,
+            &mut journal,
+            CrossDialectExecutionRuntime {
+                cancellation: &cancellation,
+                page_limit: 2,
+                require_source_consistency: &mut require_consistency,
+                interruption: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("different semantics"));
+        assert_eq!(
+            journal.projection().status,
+            MigrationStatus::ManualReconciliationRequired
+        );
+        assert_eq!(
+            operation_state(&journal, &identity_contract.operation_id).unwrap(),
+            OperationState::Prepared
+        );
     }
 
     #[test]

@@ -7,7 +7,8 @@ use thiserror::Error;
 
 use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::conversion::{
-    ConversionDialect, MigrationConversionMode, MigrationConversionPolicy, RowConversionError,
+    ConversionDialect, CrossDialectPostgresIdentity, MigrationConversionMode,
+    MigrationConversionPolicy, PostgresIdentityDataType, PostgresTargetType, RowConversionError,
 };
 use super::model::{CatalogObjectKind, Identifier, QualifiedTable, VendorCatalog};
 use super::mysql_profile::{MySqlFreezeProfileContract, MySqlFreezeProfileError};
@@ -18,7 +19,7 @@ use super::mysql_visibility::{
 use super::outage_projection::{OutageProjectionError, ReviewedOutagePolicy};
 use super::postgres_profile::{PostgresSourceProfileContract, PostgresSourceProfileError};
 
-pub const PLAN_SCHEMA_VERSION: u16 = 22;
+pub const PLAN_SCHEMA_VERSION: u16 = 23;
 pub const MYSQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
     MigrationConversionPolicy::same_dialect_exact(ConversionDialect::MySql);
 pub const POSTGRESQL_SAME_DIALECT_CONVERSION_POLICY: MigrationConversionPolicy =
@@ -453,6 +454,7 @@ unsupported_object_codes! {
     MySqlAutoIncrementConsistency => "mysql_auto_increment_consistency",
     CrossDialectPerformanceIndex => "cross_dialect_performance_index",
     CrossDialectTextCollation => "cross_dialect_text_collation",
+    CrossDialectIdentity => "cross_dialect_identity",
 }
 
 impl UnsupportedObjectCode {
@@ -465,6 +467,7 @@ impl UnsupportedObjectCode {
                 | Self::DefaultPrivileges
                 | Self::CrossDialectPerformanceIndex
                 | Self::CrossDialectTextCollation
+                | Self::CrossDialectIdentity
         )
     }
 }
@@ -1168,6 +1171,7 @@ fn validate_operation_conversion_bindings(plan: &MigrationPlan) -> Result<(), Pl
     const COPY_POLICY: &str = "table_conversion_policy";
     const CREATE_POLICY: &str = "cross_dialect_target_table_policy";
     const VERIFY_POLICY: &str = "cross_dialect_verification_policy";
+    const POSTGRES_IDENTITY: &str = "postgres_cross_dialect_identity";
     let MigrationConversionMode::CrossDialect { tables, .. } = &plan.conversion_policy.mode else {
         if plan.operations.iter().any(|operation| {
             [COPY_POLICY, CREATE_POLICY, VERIFY_POLICY]
@@ -1196,7 +1200,63 @@ fn validate_operation_conversion_bindings(plan: &MigrationPlan) -> Result<(), Pl
     let mut observed_copy = BTreeMap::new();
     let mut observed_create = BTreeMap::new();
     let mut observed_verify = BTreeMap::new();
+    let mut observed_identity = BTreeMap::new();
     for operation in &plan.operations {
+        if matches!(
+            &operation.kind,
+            OperationKind::Vendor(name) if name == "restore_postgres_cross_dialect_identity"
+        ) {
+            if operation.parameters.len() != 1
+                || !operation.parameters.contains_key(POSTGRES_IDENTITY)
+            {
+                return Err(PlanError::InvalidConversionPolicy);
+            }
+            let identity = operation
+                .parameters
+                .get(POSTGRES_IDENTITY)
+                .cloned()
+                .map(serde_json::from_value::<CrossDialectPostgresIdentity>)
+                .transpose()
+                .map_err(|_| PlanError::InvalidConversionPolicy)?
+                .ok_or(PlanError::InvalidConversionPolicy)?;
+            identity
+                .validate()
+                .map_err(|_| PlanError::InvalidConversionPolicy)?;
+            let policy = expected_source
+                .get(&identity.source_table)
+                .ok_or(PlanError::InvalidConversionPolicy)?;
+            let column = policy
+                .row_policy
+                .columns
+                .iter()
+                .find(|column| {
+                    column.source.name == identity.source_column
+                        && column.target.name == identity.target_column
+                })
+                .ok_or(PlanError::InvalidConversionPolicy)?;
+            let expected_type = match &column.target_type {
+                super::conversion::CrossDialectTargetType::PostgreSql(
+                    PostgresTargetType::SmallInt,
+                ) => PostgresIdentityDataType::SmallInt,
+                super::conversion::CrossDialectTargetType::PostgreSql(
+                    PostgresTargetType::Integer,
+                ) => PostgresIdentityDataType::Integer,
+                super::conversion::CrossDialectTargetType::PostgreSql(
+                    PostgresTargetType::BigInt,
+                ) => PostgresIdentityDataType::BigInt,
+                _ => return Err(PlanError::InvalidConversionPolicy),
+            };
+            if identity.target_table != policy.target_table
+                || identity.data_type != expected_type
+                || operation.table.as_ref() != Some(&identity.target_table)
+                || observed_identity
+                    .insert(identity.source_table.clone(), (identity, operation))
+                    .is_some()
+            {
+                return Err(PlanError::InvalidConversionPolicy);
+            }
+            continue;
+        }
         let (parameter, expected, observed) = match operation.kind {
             OperationKind::CopyTable => (COPY_POLICY, &expected_source, &mut observed_copy),
             OperationKind::CreateTable => (CREATE_POLICY, &expected_target, &mut observed_create),
@@ -1257,9 +1317,17 @@ fn validate_operation_conversion_bindings(plan: &MigrationPlan) -> Result<(), Pl
         let verify = observed_verify
             .get(&policy.source_table)
             .ok_or(PlanError::InvalidConversionPolicy)?;
+        let identity = observed_identity.get(&policy.source_table);
+        let mut expected_verify_dependencies = vec![copy.id.clone()];
+        if let Some((_, identity_operation)) = identity {
+            if identity_operation.dependencies.as_slice() != std::slice::from_ref(&copy.id) {
+                return Err(PlanError::InvalidConversionPolicy);
+            }
+            expected_verify_dependencies.push(identity_operation.id.clone());
+        }
         if !create.dependencies.is_empty()
             || copy.dependencies.as_slice() != std::slice::from_ref(&create.id)
-            || verify.dependencies.as_slice() != std::slice::from_ref(&copy.id)
+            || verify.dependencies != expected_verify_dependencies
         {
             return Err(PlanError::InvalidConversionPolicy);
         }
@@ -1289,6 +1357,10 @@ fn validate_operation_conversion_bindings(plan: &MigrationPlan) -> Result<(), Pl
                     | OperationKind::CopyTable
                     | OperationKind::VerifyTable
                     | OperationKind::VerifySchema
+            ) && !matches!(
+                &operation.kind,
+                OperationKind::Vendor(name)
+                    if name == "restore_postgres_cross_dialect_identity"
             )
         })
     {

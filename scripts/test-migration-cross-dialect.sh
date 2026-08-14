@@ -149,7 +149,7 @@ GRANT ALL PRIVILEGES ON cross_mysql_source.* TO 'cross_mysql_freeze'@'%';
 GRANT PROCESS, BACKUP_ADMIN, SYSTEM_VARIABLES_ADMIN ON *.* TO 'cross_mysql_freeze'@'%';
 GRANT SELECT ON performance_schema.* TO 'cross_mysql_freeze'@'%';
 USE cross_mysql_source;
-CREATE TABLE items (id BIGINT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE items (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB AUTO_INCREMENT=42;
 INSERT INTO items VALUES (1),(2),(3);
 CREATE TABLE bool_values (id BIGINT NOT NULL PRIMARY KEY, value TINYINT(1) NOT NULL) ENGINE=InnoDB;
 INSERT INTO bool_values VALUES (1,1),(2,0),(3,1);

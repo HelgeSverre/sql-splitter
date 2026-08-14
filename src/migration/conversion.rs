@@ -470,6 +470,54 @@ pub struct QualifiedIdentifier {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum PostgresIdentityDataType {
+    SmallInt,
+    Integer,
+    BigInt,
+}
+
+impl PostgresIdentityDataType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SmallInt => "smallint",
+            Self::Integer => "integer",
+            Self::BigInt => "bigint",
+        }
+    }
+
+    pub const fn maximum_value(self) -> i64 {
+        match self {
+            Self::SmallInt => i16::MAX as i64,
+            Self::Integer => i32::MAX as i64,
+            Self::BigInt => i64::MAX,
+        }
+    }
+}
+
+/// Exact MySQL `AUTO_INCREMENT` to PostgreSQL identity effect.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrossDialectPostgresIdentity {
+    pub source_table: QualifiedTable,
+    pub source_column: Identifier,
+    pub target_table: QualifiedTable,
+    pub target_column: Identifier,
+    pub sequence: QualifiedIdentifier,
+    pub data_type: PostgresIdentityDataType,
+    pub next_value: i64,
+}
+
+impl CrossDialectPostgresIdentity {
+    pub fn validate(&self) -> Result<(), RowConversionError> {
+        if self.next_value < 1 || self.next_value > self.data_type.maximum_value() {
+            return Err(RowConversionError::InvalidTargetType);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum JsonConversionPolicy {
     PostgreSqlJsonbToMySqlBinaryV1,
     MySqlBinaryToPostgreSqlJsonbV1,

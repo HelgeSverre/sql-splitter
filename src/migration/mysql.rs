@@ -31,10 +31,11 @@ use super::conversion::{
     cross_dialect_target_key_name, derive_mysql_to_postgres_column, ConversionDialect,
     CrossDialectKeyKind, CrossDialectResumableKey, CrossDialectTargetTableContract,
     CrossDialectTargetType, MySqlBinaryStorage, MySqlIntegerWidth, MySqlTargetEngine,
-    MySqlTargetType, MySqlTextStorage, PostgresTargetPersistence, QualifiedIdentifier,
-    RowConversionError, RowConversionPolicy, TableConversionPolicy, TargetCheckConstraint,
-    TimestampBound, TimestampSemantics, MYSQL_DATETIME_RANGE, MYSQL_TIMESTAMP_RANGE,
-    MYSQL_TIME_MAXIMUM_NANOS, MYSQL_TIME_MINIMUM_NANOS, ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+    MySqlTargetType, MySqlTextStorage, PostgresTargetPersistence, PostgresTargetType,
+    QualifiedIdentifier, RowConversionError, RowConversionPolicy, TableConversionPolicy,
+    TargetCheckConstraint, TimestampBound, TimestampSemantics, MYSQL_DATETIME_RANGE,
+    MYSQL_TIMESTAMP_RANGE, MYSQL_TIME_MAXIMUM_NANOS, MYSQL_TIME_MINIMUM_NANOS,
+    ROW_TYPE_CONVERSION_SCHEMA_VERSION,
 };
 use super::model::{
     CatalogDependency, CatalogNamespace, CatalogObject, CatalogObjectKind, ColumnMeta, DbValue,
@@ -58,7 +59,7 @@ use super::plan::{
     MYSQL_SESSION_COLLATION, MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION,
 };
 
-pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 5;
+pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 6;
 pub const MYSQL_CONSISTENCY_SNAPSHOT: &str = "mysql-repeatable-read-consistent-snapshot";
 const DEFAULT_PORT: u16 = 3306;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 10;
@@ -4670,15 +4671,6 @@ pub fn mysql_to_postgres_table_conversion_policy(
                 "MySQL conversion source table is absent from the reviewed catalog".into(),
             )
         })?;
-    if definition
-        .columns
-        .iter()
-        .any(|column| column.auto_increment)
-    {
-        return Err(MySqlPlanError::InvalidCatalog(
-            "MySQL AUTO_INCREMENT requires a separate cross-dialect mapping".into(),
-        ));
-    }
     let columns = definition
         .columns
         .iter()
@@ -4708,6 +4700,33 @@ pub fn mysql_to_postgres_table_conversion_policy(
             .map_err(MySqlPlanError::from)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    for source_column in definition
+        .columns
+        .iter()
+        .filter(|column| column.auto_increment)
+    {
+        let target_column = columns
+            .iter()
+            .find(|column| column.source.name == source_column.name)
+            .ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog(
+                    "MySQL AUTO_INCREMENT column has no target conversion".into(),
+                )
+            })?;
+        if !matches!(
+            &target_column.target_type,
+            CrossDialectTargetType::PostgreSql(
+                PostgresTargetType::SmallInt
+                    | PostgresTargetType::Integer
+                    | PostgresTargetType::BigInt
+            )
+        ) {
+            return Err(MySqlPlanError::InvalidCatalog(format!(
+                "MySQL AUTO_INCREMENT column {} cannot map to PostgreSQL identity because its lossless target type is not an integer identity type",
+                source_column.name
+            )));
+        }
+    }
     let row_policy = RowConversionPolicy {
         schema_version: ROW_TYPE_CONVERSION_SCHEMA_VERSION,
         source_dialect: ConversionDialect::MySql,
@@ -6212,6 +6231,36 @@ fn extract_catalog(
     server_version: &str,
     lower_case_table_names: u8,
 ) -> ConnectionResult<(VendorCatalog, Vec<MySqlCatalogBlocker>)> {
+    let mut auto_increment_variables: Row = conn
+        .query_first(
+            "SELECT @@session.auto_increment_increment, @@session.auto_increment_offset, @@global.auto_increment_increment, @@global.auto_increment_offset",
+        )
+        .map_err(database_error)?
+        .ok_or_else(|| {
+            ConnectionError::Database(
+                "MySQL AUTO_INCREMENT variable query returned no row".into(),
+            )
+        })?;
+    let session_auto_increment_increment: u64 = take_cell(
+        &mut auto_increment_variables,
+        0,
+        "@@session.auto_increment_increment",
+    )?;
+    let session_auto_increment_offset: u64 = take_cell(
+        &mut auto_increment_variables,
+        1,
+        "@@session.auto_increment_offset",
+    )?;
+    let global_auto_increment_increment: u64 = take_cell(
+        &mut auto_increment_variables,
+        2,
+        "@@global.auto_increment_increment",
+    )?;
+    let global_auto_increment_offset: u64 = take_cell(
+        &mut auto_increment_variables,
+        3,
+        "@@global.auto_increment_offset",
+    )?;
     let mut objects = Vec::new();
     let mut blockers = vec![MySqlCatalogBlocker {
         object_id: catalog_id("catalog_visibility", database, database, ""),
@@ -6533,6 +6582,22 @@ fn extract_catalog(
     vendor_metadata.insert(
         "lower_case_table_names".into(),
         lower_case_table_names.to_string(),
+    );
+    vendor_metadata.insert(
+        "session_auto_increment_increment".into(),
+        session_auto_increment_increment.to_string(),
+    );
+    vendor_metadata.insert(
+        "session_auto_increment_offset".into(),
+        session_auto_increment_offset.to_string(),
+    );
+    vendor_metadata.insert(
+        "global_auto_increment_increment".into(),
+        global_auto_increment_increment.to_string(),
+    );
+    vendor_metadata.insert(
+        "global_auto_increment_offset".into(),
+        global_auto_increment_offset.to_string(),
     );
     Ok((
         VendorCatalog {
@@ -8141,6 +8206,10 @@ mod tests {
             vendor_metadata: BTreeMap::from([
                 ("information_schema_stats_expiry".into(), "0".into()),
                 ("lower_case_table_names".into(), "0".into()),
+                ("session_auto_increment_increment".into(), "1".into()),
+                ("session_auto_increment_offset".into(), "1".into()),
+                ("global_auto_increment_increment".into(), "1".into()),
+                ("global_auto_increment_offset".into(), "1".into()),
             ]),
         }
     }

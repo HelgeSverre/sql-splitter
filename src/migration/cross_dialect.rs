@@ -4,17 +4,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::artifact::{read_json, write_json_new, ArtifactError};
 use super::canonical::CANONICAL_ENCODING_VERSION;
 use super::conversion::{
-    ConversionDialect, CrossDialectSourceType, MigrationConversionPolicy, MySqlTargetType,
-    QualifiedIdentifier, TableConversionPolicy,
+    ConversionDialect, CrossDialectPostgresIdentity, CrossDialectSourceType,
+    CrossDialectTargetType, MigrationConversionPolicy, MySqlTargetType, PostgresIdentityDataType,
+    PostgresTargetType, QualifiedIdentifier, TableConversionPolicy,
 };
 use super::model::{CatalogObjectKind, Identifier, QualifiedTable, VendorCatalog};
 use super::mysql::{
-    mysql_catalog_fingerprint, mysql_catalog_visibility_is_complete,
+    mysql_auto_increment_states, mysql_catalog_fingerprint, mysql_catalog_visibility_is_complete,
     mysql_to_postgres_table_conversion_policy, validate_metadata_visibility_capture,
     MySqlCatalogSnapshot, MySqlEndpointConfig, MySqlMetadataVisibilityCapture, MySqlPlanError,
 };
@@ -233,7 +235,7 @@ pub fn build_postgres_to_mysql_plan(
         ConversionDialect::MySql,
         policies.clone(),
     )?;
-    let operations = cross_dialect_operations(&policies)?;
+    let operations = cross_dialect_operations(&policies, &[])?;
     let source_fingerprint = catalog_fingerprint(&source.catalog)?;
     let target_fingerprint = mysql_catalog_fingerprint(&target_visibility.authoritative_catalog)
         .map_err(|error| {
@@ -379,7 +381,9 @@ pub fn build_mysql_to_postgres_plan(
         ConversionDialect::PostgreSql,
         policies.clone(),
     )?;
-    let operations = cross_dialect_operations(&policies)?;
+    let (identities, mut identity_findings) =
+        mysql_to_postgres_identity_contracts(&source_visibility.authoritative_catalog, &policies)?;
+    let operations = cross_dialect_operations(&policies, &identities)?;
     let source_fingerprint = mysql_catalog_fingerprint(&source_visibility.authoritative_catalog)
         .map_err(|error| {
             CrossDialectPlanError::MySql(MySqlPlanError::InvalidCatalog(error.to_string()))
@@ -422,6 +426,7 @@ pub fn build_mysql_to_postgres_plan(
         &policies,
         text_collation,
     ));
+    unsupported.append(&mut identity_findings);
     unsupported.extend(target.unsupported.objects.iter().cloned());
     let target_object_count = target
         .catalog
@@ -492,6 +497,7 @@ pub fn build_mysql_to_postgres_plan(
 
 fn cross_dialect_operations(
     policies: &[TableConversionPolicy],
+    identities: &[CrossDialectPostgresIdentity],
 ) -> Result<Vec<PlanOperation>, CrossDialectPlanError> {
     let mut operations = Vec::new();
     for policy in policies {
@@ -513,16 +519,36 @@ fn cross_dialect_operations(
                 serde_json::to_value(policy)?,
             )]),
         )?;
+        let copy_id = copy.id.clone();
+        let mut verify_dependencies = vec![copy_id.clone()];
+        operations.extend([create, copy]);
+        let table_identities = identities
+            .iter()
+            .filter(|identity| identity.source_table == policy.source_table)
+            .collect::<Vec<_>>();
+        for identity in table_identities {
+            let restore = PlanOperation::new(
+                OperationKind::Vendor("restore_postgres_cross_dialect_identity".into()),
+                Some(policy.target_table.clone()),
+                vec![copy_id.clone()],
+                BTreeMap::from([(
+                    "postgres_cross_dialect_identity".into(),
+                    serde_json::to_value(identity)?,
+                )]),
+            )?;
+            verify_dependencies.push(restore.id.clone());
+            operations.push(restore);
+        }
         let verify = PlanOperation::new(
             OperationKind::VerifyTable,
             Some(policy.source_table.clone()),
-            vec![copy.id.clone()],
+            verify_dependencies,
             BTreeMap::from([(
                 "cross_dialect_verification_policy".into(),
                 serde_json::to_value(policy)?,
             )]),
         )?;
-        operations.extend([create, copy, verify]);
+        operations.push(verify);
     }
     let verify_schema = PlanOperation::new(
         OperationKind::VerifySchema,
@@ -535,6 +561,159 @@ fn cross_dialect_operations(
     )?;
     operations.push(verify_schema);
     Ok(operations)
+}
+
+pub(crate) fn mysql_to_postgres_identity_contracts(
+    catalog: &VendorCatalog,
+    policies: &[TableConversionPolicy],
+) -> Result<(Vec<CrossDialectPostgresIdentity>, Vec<UnsupportedObject>), CrossDialectPlanError> {
+    let states = mysql_auto_increment_states(catalog)
+        .map_err(|error| MySqlPlanError::InvalidCatalog(error.to_string()))?;
+    let default_stride_is_exact = [
+        "session_auto_increment_increment",
+        "session_auto_increment_offset",
+        "global_auto_increment_increment",
+        "global_auto_increment_offset",
+    ]
+    .iter()
+    .all(|key| {
+        catalog
+            .vendor_metadata
+            .get(*key)
+            .is_some_and(|value| value == "1")
+    });
+    let mut identities = Vec::new();
+    let mut findings = Vec::new();
+    for state in states {
+        if !default_stride_is_exact {
+            findings.push(UnsupportedObject {
+                code: UnsupportedObjectCode::MySqlAutoIncrementConsistency,
+                object_id: cross_identity_object_id(&state.table, &state.column),
+                object_kind: "cross_dialect_identity".into(),
+                reason: format!(
+                    "MySQL AUTO_INCREMENT column {}.{}.{} requires session and global increment and offset values of exactly 1 for PostgreSQL identity",
+                    state.table.namespace, state.table.name, state.column
+                ),
+                required_semantics: true,
+            });
+            continue;
+        }
+        let policy = policies
+            .iter()
+            .find(|policy| policy.source_table == state.table)
+            .ok_or(CrossDialectPlanError::IncompleteMapping)?;
+        let column = policy
+            .row_policy
+            .columns
+            .iter()
+            .find(|column| column.source.name == state.column)
+            .ok_or_else(|| {
+                MySqlPlanError::InvalidCatalog(format!(
+                    "MySQL AUTO_INCREMENT column {}.{}.{} has no reviewed conversion",
+                    state.table.namespace, state.table.name, state.column
+                ))
+            })?;
+        let data_type = match &column.target_type {
+            CrossDialectTargetType::PostgreSql(PostgresTargetType::SmallInt) => {
+                PostgresIdentityDataType::SmallInt
+            }
+            CrossDialectTargetType::PostgreSql(PostgresTargetType::Integer) => {
+                PostgresIdentityDataType::Integer
+            }
+            CrossDialectTargetType::PostgreSql(PostgresTargetType::BigInt) => {
+                PostgresIdentityDataType::BigInt
+            }
+            _ => {
+                return Err(MySqlPlanError::InvalidCatalog(format!(
+                    "MySQL AUTO_INCREMENT column {}.{}.{} cannot map to PostgreSQL identity because its lossless target type is not an integer identity type",
+                    state.table.namespace, state.table.name, state.column
+                ))
+                .into());
+            }
+        };
+        let Some(next_value) = state.next_value.and_then(|value| i64::try_from(value).ok()) else {
+            findings.push(UnsupportedObject {
+                code: UnsupportedObjectCode::MySqlAutoIncrementConsistency,
+                object_id: cross_identity_object_id(&state.table, &state.column),
+                object_kind: "cross_dialect_identity".into(),
+                reason: format!(
+                    "MySQL AUTO_INCREMENT column {}.{}.{} has no exact PostgreSQL-compatible next-value evidence",
+                    state.table.namespace, state.table.name, state.column
+                ),
+                required_semantics: true,
+            });
+            continue;
+        };
+        let sequence = QualifiedIdentifier {
+            namespace: policy.target_table.namespace.clone(),
+            name: cross_identity_sequence_name(&policy.target_table, &column.target.name)?,
+        };
+        let identity = CrossDialectPostgresIdentity {
+            source_table: state.table.clone(),
+            source_column: state.column.clone(),
+            target_table: policy.target_table.clone(),
+            target_column: column.target.name.clone(),
+            sequence,
+            data_type,
+            next_value,
+        };
+        if identity.validate().is_err() {
+            findings.push(UnsupportedObject {
+                code: UnsupportedObjectCode::MySqlAutoIncrementConsistency,
+                object_id: cross_identity_object_id(&state.table, &state.column),
+                object_kind: "cross_dialect_identity".into(),
+                reason: format!(
+                    "MySQL AUTO_INCREMENT next value for {}.{}.{} is outside the reviewed PostgreSQL identity range",
+                    state.table.namespace, state.table.name, state.column
+                ),
+                required_semantics: true,
+            });
+            continue;
+        }
+        findings.push(UnsupportedObject {
+            code: UnsupportedObjectCode::CrossDialectIdentity,
+            object_id: cross_identity_object_id(&state.table, &state.column),
+            object_kind: "cross_dialect_identity".into(),
+            reason: format!(
+                "MySQL AUTO_INCREMENT column {}.{}.{} is restored as PostgreSQL GENERATED BY DEFAULT identity {}.{} with exact initial next value {}; unlike MySQL, an explicit target value does not advance the PostgreSQL sequence and an explicit NULL does not request generation",
+                state.table.namespace,
+                state.table.name,
+                state.column,
+                identity.target_table.namespace,
+                identity.target_table.name,
+                identity.next_value
+            ),
+            required_semantics: false,
+        });
+        identities.push(identity);
+    }
+    identities.sort();
+    findings
+        .sort_by(|left, right| (&left.object_id, left.code).cmp(&(&right.object_id, right.code)));
+    Ok((identities, findings))
+}
+
+fn cross_identity_object_id(table: &QualifiedTable, column: &Identifier) -> String {
+    let identity = [
+        table.namespace.as_str(),
+        table.name.as_str(),
+        column.as_str(),
+    ]
+    .into_iter()
+    .map(|part| format!("{}:{part}", part.len()))
+    .collect::<Vec<_>>()
+    .join(":");
+    format!("cross-dialect-identity:{identity}")
+}
+
+fn cross_identity_sequence_name(
+    table: &QualifiedTable,
+    column: &Identifier,
+) -> Result<Identifier, CrossDialectPlanError> {
+    let bytes = serde_json::to_vec(&(table, column))?;
+    let digest = hex::encode(Sha256::digest(bytes));
+    Identifier::new(format!("sqlspl_identity_{}", &digest[..32]))
+        .map_err(|_| CrossDialectPlanError::InvalidMapping)
 }
 
 fn require_complete_source_table_mapping(
@@ -1037,6 +1216,10 @@ pub(crate) mod tests {
             vendor_metadata: BTreeMap::from([
                 ("information_schema_stats_expiry".into(), "0".into()),
                 ("lower_case_table_names".into(), "0".into()),
+                ("session_auto_increment_increment".into(), "1".into()),
+                ("session_auto_increment_offset".into(), "1".into()),
+                ("global_auto_increment_increment".into(), "1".into()),
+                ("global_auto_increment_offset".into(), "1".into()),
             ]),
         }
     }
@@ -1251,6 +1434,46 @@ pub(crate) mod tests {
         build_mysql_to_postgres_plan(&source, &source_visibility, &target, &mapping).unwrap()
     }
 
+    pub(crate) fn mysql_to_postgres_identity_reviewed_plan(next_value: u64) -> ReviewedPlan {
+        let mut source = mysql_snapshot("mysql://source/app", true);
+        for object in &mut source.catalog.namespaces[0].objects {
+            if object.kind == CatalogObjectKind::Column && object.name.as_str() == "id" {
+                object
+                    .attributes
+                    .insert("extra".into(), serde_json::json!("auto_increment"));
+            }
+            if object.kind == CatalogObjectKind::Table && object.name.as_str() == "items" {
+                object
+                    .attributes
+                    .insert("auto_increment".into(), serde_json::json!(next_value));
+                object.attributes.insert(
+                    "auto_increment_column".into(),
+                    serde_json::to_value(identifier("id")).unwrap(),
+                );
+            }
+        }
+        source.snapshot_evidence.catalog_fingerprint =
+            mysql_catalog_fingerprint(&source.catalog).unwrap();
+        let source_visibility = mysql_visibility(&source);
+        let target = postgres_snapshot("postgres://target/app", false);
+        let mapping = CrossDialectMapping {
+            schema_version: CROSS_DIALECT_MAPPING_SCHEMA_VERSION,
+            source_dialect: ConversionDialect::MySql,
+            target_dialect: ConversionDialect::PostgreSql,
+            target_defaults: CrossDialectTargetDefaults::PostgreSql {
+                text_collation: QualifiedIdentifier {
+                    namespace: identifier("pg_catalog"),
+                    name: identifier("C"),
+                },
+            },
+            tables: vec![CrossDialectTableMapping {
+                source: table("app", "items"),
+                target: table("public", "items"),
+            }],
+        };
+        build_mysql_to_postgres_plan(&source, &source_visibility, &target, &mapping).unwrap()
+    }
+
     pub(crate) fn postgres_to_mysql_reviewed_plan() -> ReviewedPlan {
         let source = postgres_snapshot("postgres://source/app?user=reader", true);
         let target = mysql_snapshot("mysql://target/app", false);
@@ -1301,7 +1524,7 @@ pub(crate) mod tests {
     fn operations_bind_create_copy_verify_and_terminal_dependencies() {
         let policy = table_policy();
         policy.validate().unwrap();
-        let operations = cross_dialect_operations(std::slice::from_ref(&policy)).unwrap();
+        let operations = cross_dialect_operations(std::slice::from_ref(&policy), &[]).unwrap();
         assert_eq!(operations.len(), 4);
         let [create, copy, verify, verify_schema] = operations.as_slice() else {
             panic!("cross-dialect operation graph changed")
@@ -1616,6 +1839,177 @@ pub(crate) mod tests {
         assert!(finding
             .reason
             .contains("comparison, sort, and uniqueness behavior may differ"));
+    }
+
+    #[test]
+    fn mysql_to_postgres_plans_exact_auto_increment_identity_restore() {
+        let mut source = mysql_snapshot("mysql://source/app", true);
+        for object in &mut source.catalog.namespaces[0].objects {
+            if object.kind == CatalogObjectKind::Column && object.name.as_str() == "id" {
+                object
+                    .attributes
+                    .insert("extra".into(), serde_json::json!("auto_increment"));
+            }
+            if object.kind == CatalogObjectKind::Table && object.name.as_str() == "items" {
+                object
+                    .attributes
+                    .insert("auto_increment".into(), serde_json::json!(42));
+                object.attributes.insert(
+                    "auto_increment_column".into(),
+                    serde_json::to_value(identifier("id")).unwrap(),
+                );
+            }
+        }
+        source.snapshot_evidence.catalog_fingerprint =
+            mysql_catalog_fingerprint(&source.catalog).unwrap();
+        let source_visibility = mysql_visibility(&source);
+        let target = postgres_snapshot("postgres://target/app", false);
+        let mapping = CrossDialectMapping {
+            schema_version: CROSS_DIALECT_MAPPING_SCHEMA_VERSION,
+            source_dialect: ConversionDialect::MySql,
+            target_dialect: ConversionDialect::PostgreSql,
+            target_defaults: CrossDialectTargetDefaults::PostgreSql {
+                text_collation: QualifiedIdentifier {
+                    namespace: identifier("pg_catalog"),
+                    name: identifier("C"),
+                },
+            },
+            tables: vec![CrossDialectTableMapping {
+                source: table("app", "items"),
+                target: table("public", "items"),
+            }],
+        };
+
+        let reviewed =
+            build_mysql_to_postgres_plan(&source, &source_visibility, &target, &mapping).unwrap();
+        assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+        let restore = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| {
+                matches!(
+                    &operation.kind,
+                    OperationKind::Vendor(name)
+                        if name == "restore_postgres_cross_dialect_identity"
+                )
+            })
+            .unwrap();
+        let restore_position = reviewed
+            .plan
+            .operations
+            .iter()
+            .position(|operation| operation.id == restore.id)
+            .unwrap();
+        let copy_position = reviewed
+            .plan
+            .operations
+            .iter()
+            .position(|operation| operation.kind == OperationKind::CopyTable)
+            .unwrap();
+        let verify_position = reviewed
+            .plan
+            .operations
+            .iter()
+            .position(|operation| operation.kind == OperationKind::VerifyTable)
+            .unwrap();
+        assert!(copy_position < restore_position);
+        assert!(restore_position < verify_position);
+        let identity: CrossDialectPostgresIdentity =
+            serde_json::from_value(restore.parameters["postgres_cross_dialect_identity"].clone())
+                .unwrap();
+        assert_eq!(identity.source_table, table("app", "items"));
+        assert_eq!(identity.target_table, table("public", "items"));
+        assert_eq!(identity.source_column, identifier("id"));
+        assert_eq!(identity.target_column, identifier("id"));
+        assert_eq!(identity.data_type, PostgresIdentityDataType::BigInt);
+        assert_eq!(identity.next_value, 42);
+        assert_eq!(restore.dependencies.len(), 1);
+        let verify = reviewed
+            .plan
+            .operations
+            .iter()
+            .find(|operation| operation.kind == OperationKind::VerifyTable)
+            .unwrap();
+        assert!(verify.dependencies.contains(&restore.id));
+        let finding = reviewed
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .find(|finding| finding.code == UnsupportedObjectCode::CrossDialectIdentity)
+            .unwrap();
+        assert!(!finding.required_semantics);
+        assert!(finding.reason.contains("app.items.id"));
+        assert!(finding.reason.contains("exact initial next value 42"));
+        assert!(finding
+            .reason
+            .contains("explicit target value does not advance"));
+        assert!(finding
+            .reason
+            .contains("explicit NULL does not request generation"));
+
+        source
+            .catalog
+            .vendor_metadata
+            .insert("global_auto_increment_increment".into(), "2".into());
+        source.snapshot_evidence.catalog_fingerprint =
+            mysql_catalog_fingerprint(&source.catalog).unwrap();
+        let changed_visibility = mysql_visibility(&source);
+        let changed =
+            build_mysql_to_postgres_plan(&source, &changed_visibility, &target, &mapping).unwrap();
+        let blocker = changed
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .find(|finding| finding.code == UnsupportedObjectCode::MySqlAutoIncrementConsistency)
+            .unwrap();
+        assert!(blocker.required_semantics);
+        assert!(blocker
+            .reason
+            .contains("increment and offset values of exactly 1"));
+        assert!(!changed.plan.operations.iter().any(|operation| {
+            matches!(
+                &operation.kind,
+                OperationKind::Vendor(name)
+                    if name == "restore_postgres_cross_dialect_identity"
+            )
+        }));
+    }
+
+    #[test]
+    fn mysql_unsigned_bigint_auto_increment_fails_before_target_effects() {
+        let mut catalog = mysql_catalog(true);
+        for object in &mut catalog.namespaces[0].objects {
+            if object.kind == CatalogObjectKind::Column && object.name.as_str() == "id" {
+                object
+                    .attributes
+                    .insert("extra".into(), serde_json::json!("auto_increment"));
+                object.attributes.insert(
+                    "mysql_ddl_type".into(),
+                    serde_json::to_value(MySqlColumnType::Integer {
+                        name: "bigint".into(),
+                        unsigned: true,
+                        display_width: None,
+                    })
+                    .unwrap(),
+                );
+            }
+        }
+        let error = mysql_to_postgres_table_conversion_policy(
+            &catalog,
+            &table("app", "items"),
+            table("public", "items"),
+            QualifiedIdentifier {
+                namespace: identifier("pg_catalog"),
+                name: identifier("C"),
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("lossless target type is not an integer identity type"));
     }
 
     #[test]
