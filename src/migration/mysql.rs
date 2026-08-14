@@ -192,7 +192,7 @@ pub enum MySqlPlanError {
     FreezeProfile(#[from] MySqlFreezeProfileError),
     #[error("invalid MySQL metadata-visibility evidence")]
     MetadataVisibility(#[from] MySqlVisibilityError),
-    #[error("cross-dialect conversion policy derivation failed")]
+    #[error(transparent)]
     Conversion(#[from] RowConversionError),
 }
 
@@ -4633,6 +4633,23 @@ pub fn mysql_to_postgres_table_conversion_policy(
                 )
             })?,
     )?;
+    for column in source_namespace.objects.iter().filter(|object| {
+        object.kind == CatalogObjectKind::Column
+            && optional_text(object, "table_name") == Some(source_table.name.as_str())
+    }) {
+        let ddl_type = column.attributes.get("mysql_ddl_type").ok_or_else(|| {
+            MySqlPlanError::InvalidCatalog(format!(
+                "MySQL column {} has no typed value contract",
+                column.id
+            ))
+        })?;
+        if ddl_type.is_null() {
+            return Err(RowConversionError::UnsupportedSourceType {
+                vendor_type: required_text(column, "column_type")?.to_owned(),
+            }
+            .into());
+        }
+    }
     let definition = mysql_table_definitions(catalog)?
         .into_iter()
         .find(|definition| &definition.table == source_table)
@@ -8382,6 +8399,54 @@ mod tests {
                     scale: 0,
                 }],
             ]
+        );
+    }
+
+    #[test]
+    fn mysql_catalog_reports_an_unsupported_cross_dialect_source_type() {
+        let mut catalog = catalog(true);
+        let column = catalog.namespaces[0]
+            .objects
+            .iter_mut()
+            .find(|object| object.kind == CatalogObjectKind::Column)
+            .unwrap();
+        column
+            .attributes
+            .insert("data_type".into(), serde_json::json!("enum"));
+        column.attributes.insert(
+            "column_type".into(),
+            serde_json::json!("enum('sad','ok','happy')"),
+        );
+        column
+            .attributes
+            .insert("mysql_ddl_type".into(), serde_json::Value::Null);
+
+        let error = mysql_to_postgres_table_conversion_policy(
+            &catalog,
+            &QualifiedTable {
+                namespace: identifier("app"),
+                name: identifier("items"),
+            },
+            QualifiedTable {
+                namespace: identifier("public"),
+                name: identifier("items"),
+            },
+            QualifiedIdentifier {
+                namespace: identifier("pg_catalog"),
+                name: identifier("C"),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            MySqlPlanError::Conversion(RowConversionError::UnsupportedSourceType {
+                ref vendor_type,
+            }) if vendor_type == "enum('sad','ok','happy')"
+        ));
+        assert_eq!(
+            error.to_string(),
+            "source vendor type enum('sad','ok','happy') has no reviewed cross-dialect mapping"
         );
     }
 
