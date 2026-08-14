@@ -58,7 +58,7 @@ use super::plan::{
     MYSQL_SESSION_COLLATION, MYSQL_STRICT_SQL_MODE, PLAN_SCHEMA_VERSION,
 };
 
-pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 4;
+pub const MYSQL_CATALOG_FORMAT_VERSION: u32 = 5;
 pub const MYSQL_CONSISTENCY_SNAPSHOT: &str = "mysql-repeatable-read-consistent-snapshot";
 const DEFAULT_PORT: u16 = 3306;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 10;
@@ -297,6 +297,9 @@ pub struct MySqlAutoIncrementState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MySqlColumnType {
+    Unsupported {
+        column_type: String,
+    },
     Integer {
         name: String,
         unsigned: bool,
@@ -1959,11 +1962,15 @@ fn required_blocker_keys(
                 }
             }
             CatalogObjectKind::Column => {
-                if object
+                let ddl_type = object
                     .attributes
                     .get("mysql_ddl_type")
-                    .is_none_or(serde_json::Value::is_null)
-                    || !supported_value_type(required_text(object, "data_type")?)
+                    .cloned()
+                    .map(serde_json::from_value::<MySqlColumnType>)
+                    .transpose()?;
+                if ddl_type.is_none_or(|data_type| {
+                    matches!(data_type, MySqlColumnType::Unsupported { .. })
+                }) || !supported_value_type(required_text(object, "data_type")?)
                     || object
                         .attributes
                         .get("default")
@@ -4261,6 +4268,7 @@ fn validate_mysql_write_value_type(
         };
     }
     let exact = match data_type {
+        MySqlColumnType::Unsupported { .. } => false,
         MySqlColumnType::Integer { unsigned, .. } => {
             if *unsigned {
                 matches!(value, DbValue::Unsigned(_))
@@ -4515,12 +4523,12 @@ fn table_contracts(
                     object.id
                 ))
             })?;
-            if data_type.is_null() {
+            let data_type: MySqlColumnType = serde_json::from_value(data_type.clone())
+                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            if matches!(data_type, MySqlColumnType::Unsupported { .. }) {
                 unsupported_tables.insert(table_name.to_owned());
                 continue;
             }
-            let data_type = serde_json::from_value(data_type.clone())
-                .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
             let previous = columns_by_table
                 .entry(table_name.into())
                 .or_default()
@@ -4646,9 +4654,10 @@ pub fn mysql_to_postgres_table_conversion_policy(
                 column.id
             ))
         })?;
-        if ddl_type.is_null() {
+        let ddl_type: MySqlColumnType = serde_json::from_value(ddl_type.clone())?;
+        if let MySqlColumnType::Unsupported { column_type } = ddl_type {
             return Err(RowConversionError::UnsupportedSourceType {
-                vendor_type: required_text(column, "column_type")?.to_owned(),
+                vendor_type: column_type,
             }
             .into());
         }
@@ -5136,6 +5145,12 @@ fn mysql_conversion_source_type(
     column: &MySqlColumnDefinition,
 ) -> Result<MySqlTargetType, MySqlPlanError> {
     let data_type = match &column.data_type {
+        MySqlColumnType::Unsupported { column_type } => {
+            return Err(RowConversionError::UnsupportedSourceType {
+                vendor_type: column_type.clone(),
+            }
+            .into());
+        }
         MySqlColumnType::Integer { name, unsigned, .. } => MySqlTargetType::Integer {
             width: match name.as_str() {
                 "tinyint" => MySqlIntegerWidth::Tiny,
@@ -6250,9 +6265,15 @@ fn extract_catalog(
             collation: collation.clone(),
             extra: extra.clone(),
         };
-        let ddl_type = parse_mysql_column_type(&column_type).ok();
+        let ddl_type = parse_mysql_column_type(&column_type).unwrap_or_else(|_| {
+            MySqlColumnType::Unsupported {
+                column_type: column_type.clone(),
+            }
+        });
         let mut ddl_reasons = Vec::new();
-        if ddl_type.is_none() || !supported_value_type(&data_type) {
+        if matches!(ddl_type, MySqlColumnType::Unsupported { .. })
+            || !supported_value_type(&data_type)
+        {
             ddl_reasons.push(format!(
                 "column type {column_type} has no reviewed typed DDL and lossless canonical value contract"
             ));
@@ -6295,7 +6316,7 @@ fn extract_catalog(
         attributes.insert("column_type".into(), serde_json::json!(column_type));
         attributes.insert(
             "mysql_ddl_type".into(),
-            serde_json::to_value(ddl_type)
+            serde_json::to_value(&ddl_type)
                 .map_err(|error| ConnectionError::Database(error.to_string()))?,
         );
         attributes.insert("character_set".into(), serde_json::json!(charset));
@@ -6949,6 +6970,11 @@ fn require_no_type_modifiers(name: &str, arguments: &[u32], unsigned: bool) -> R
 
 fn render_mysql_column_type(data_type: &MySqlColumnType) -> Result<String, MySqlPlanError> {
     let rendered = match data_type {
+        MySqlColumnType::Unsupported { column_type } => {
+            return Err(MySqlPlanError::InvalidCatalog(format!(
+                "MySQL column type {column_type} has no reviewed typed DDL contract"
+            )));
+        }
         MySqlColumnType::Integer {
             name,
             unsigned,
@@ -8420,11 +8446,19 @@ mod tests {
             "column_type".into(),
             serde_json::json!("enum('sad','ok','happy')"),
         );
-        column
-            .attributes
-            .insert("mysql_ddl_type".into(), serde_json::Value::Null);
+        column.attributes.insert(
+            "mysql_ddl_type".into(),
+            serde_json::to_value(MySqlColumnType::Unsupported {
+                column_type: "enum('sad','ok','happy')".into(),
+            })
+            .unwrap(),
+        );
 
         assert!(table_contracts(&catalog).unwrap().is_empty());
+        assert_eq!(
+            mysql_table_definitions(&catalog).unwrap_err().to_string(),
+            "invalid MySQL catalog: MySQL column type enum('sad','ok','happy') has no reviewed typed DDL contract"
+        );
 
         let error = mysql_to_postgres_table_conversion_policy(
             &catalog,

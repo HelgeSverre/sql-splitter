@@ -725,8 +725,8 @@ pub(crate) mod tests {
     use crate::migration::conversion::{
         CrossDialectKeyKind, CrossDialectResumableKey, CrossDialectSourceType,
         CrossDialectTargetTableContract, CrossDialectTargetType, MySqlIntegerWidth,
-        MySqlTargetEngine, MySqlTargetType, RowConversionPolicy, ValueConversionRule,
-        ROW_TYPE_CONVERSION_SCHEMA_VERSION,
+        MySqlTargetEngine, MySqlTargetType, RowConversionError, RowConversionPolicy,
+        ValueConversionRule, ROW_TYPE_CONVERSION_SCHEMA_VERSION,
     };
     use crate::migration::model::{CatalogNamespace, CatalogObject, ColumnMeta};
     use crate::migration::mysql::{
@@ -1332,5 +1332,74 @@ pub(crate) mod tests {
             Some(&source_visibility.authoritative_catalog)
         );
         assert!(reviewed.plan.mysql_target_snapshot_evidence.is_none());
+    }
+
+    #[test]
+    fn mysql_to_postgres_builder_reports_an_unsupported_column_type() {
+        let mut source = mysql_snapshot("mysql://source/app", true);
+        let column_id = {
+            let column = source.catalog.namespaces[0]
+                .objects
+                .iter_mut()
+                .find(|object| object.kind == CatalogObjectKind::Column)
+                .unwrap();
+            column
+                .attributes
+                .insert("data_type".into(), serde_json::json!("enum"));
+            column.attributes.insert(
+                "column_type".into(),
+                serde_json::json!("enum('sad','ok','happy')"),
+            );
+            column.attributes.insert(
+                "mysql_ddl_type".into(),
+                serde_json::to_value(MySqlColumnType::Unsupported {
+                    column_type: "enum('sad','ok','happy')".into(),
+                })
+                .unwrap(),
+            );
+            column.id.clone()
+        };
+        source.blockers.push(MySqlCatalogBlocker {
+            object_id: column_id,
+            object_kind: "column_ddl".into(),
+            reason: "MySQL column type has no reviewed typed contract".into(),
+        });
+        source.snapshot_evidence.catalog_fingerprint =
+            mysql_catalog_fingerprint(&source.catalog).unwrap();
+        let mut source_visibility = mysql_visibility(&source);
+        source_visibility.authoritative_blockers = source
+            .blockers
+            .iter()
+            .filter(|blocker| blocker.object_kind != "catalog_visibility")
+            .cloned()
+            .collect();
+        let target = postgres_snapshot("postgres://target/app", false);
+        let mapping = CrossDialectMapping {
+            schema_version: CROSS_DIALECT_MAPPING_SCHEMA_VERSION,
+            source_dialect: ConversionDialect::MySql,
+            target_dialect: ConversionDialect::PostgreSql,
+            target_defaults: CrossDialectTargetDefaults::PostgreSql {
+                text_collation: QualifiedIdentifier {
+                    namespace: identifier("pg_catalog"),
+                    name: identifier("C"),
+                },
+            },
+            tables: vec![CrossDialectTableMapping {
+                source: table("app", "items"),
+                target: table("public", "items"),
+            }],
+        };
+
+        let error = build_mysql_to_postgres_plan(&source, &source_visibility, &target, &mapping)
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                CrossDialectPlanError::MySql(MySqlPlanError::Conversion(
+                    RowConversionError::UnsupportedSourceType { vendor_type }
+                )) if vendor_type == "enum('sad','ok','happy')"
+            ),
+            "{error:?}"
+        );
     }
 }
