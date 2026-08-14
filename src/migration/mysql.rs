@@ -3976,8 +3976,14 @@ impl VerificationSession for MySqlVerifier {
 
 #[derive(Debug, Clone)]
 struct TableContract {
-    columns: BTreeMap<String, ColumnMeta>,
+    columns: BTreeMap<String, MySqlReadColumn>,
     key: MySqlResumableKey,
+}
+
+#[derive(Debug, Clone)]
+struct MySqlReadColumn {
+    meta: ColumnMeta,
+    data_type: MySqlColumnType,
 }
 
 struct MySqlSnapshotReader {
@@ -4065,7 +4071,7 @@ fn mysql_select_page(
             ));
         }
     }
-    let columns = request
+    let read_columns = request
         .projection
         .iter()
         .map(|column| {
@@ -4080,6 +4086,10 @@ fn mysql_select_page(
                 })
         })
         .collect::<ConnectionResult<Vec<_>>>()?;
+    let columns = read_columns
+        .iter()
+        .map(|column| column.meta.clone())
+        .collect::<Vec<_>>();
     let projection = request
         .projection
         .iter()
@@ -4122,8 +4132,8 @@ fn mysql_select_page(
         let values = row.map_err(database_error)?.unwrap();
         let converted = values
             .into_iter()
-            .zip(&columns)
-            .map(|(value, column)| mysql_value(value, column))
+            .zip(&read_columns)
+            .map(|(value, column)| mysql_value(value, &column.meta, &column.data_type))
             .collect::<ConnectionResult<Vec<_>>>()?;
         let encoded_bytes = serde_json::to_vec(&converted)
             .map_err(|error| ConnectionError::Database(error.to_string()))?
@@ -4369,9 +4379,38 @@ fn render_mysql_decimal(coefficient: &[u8], scale: i32) -> ConnectionResult<Vec<
     Ok(rendered.into_bytes())
 }
 
-fn mysql_value(value: Value, column: &ColumnMeta) -> ConnectionResult<DbValue> {
+fn mysql_value(
+    value: Value,
+    column: &ColumnMeta,
+    data_type: &MySqlColumnType,
+) -> ConnectionResult<DbValue> {
     match value {
         Value::NULL => Ok(DbValue::Null),
+        Value::Int(value)
+            if matches!(data_type, MySqlColumnType::Integer { unsigned: true, .. }) =>
+        {
+            u128::try_from(value).map(DbValue::Unsigned).map_err(|_| {
+                ConnectionError::Database("MySQL unsigned integer was negative".into())
+            })
+        }
+        Value::UInt(value)
+            if matches!(
+                data_type,
+                MySqlColumnType::Integer {
+                    unsigned: false,
+                    ..
+                }
+            ) =>
+        {
+            i64::try_from(value)
+                .map(i128::from)
+                .map(DbValue::Signed)
+                .map_err(|_| {
+                    ConnectionError::Database(
+                        "MySQL signed integer exceeded its reviewed range".into(),
+                    )
+                })
+        }
         Value::Int(value) => Ok(DbValue::Signed(i128::from(value))),
         Value::UInt(value) => Ok(DbValue::Unsigned(u128::from(value))),
         Value::Float(value) => Ok(DbValue::Float32(value.to_bits())),
@@ -4451,7 +4490,7 @@ fn table_contracts(
 ) -> ConnectionResult<BTreeMap<QualifiedTable, TableContract>> {
     let mut contracts = BTreeMap::new();
     for namespace in &catalog.namespaces {
-        let mut columns_by_table = BTreeMap::<String, BTreeMap<String, ColumnMeta>>::new();
+        let mut columns_by_table = BTreeMap::<String, BTreeMap<String, MySqlReadColumn>>::new();
         for object in namespace
             .objects
             .iter()
@@ -4469,10 +4508,26 @@ fn table_contracts(
                 })?;
             let meta = column_meta(object)
                 .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
+            let data_type = serde_json::from_value(
+                object
+                    .attributes
+                    .get("mysql_ddl_type")
+                    .cloned()
+                    .ok_or_else(|| {
+                        ConnectionError::InvalidRequest(format!(
+                            "MySQL column {} has no typed value contract",
+                            object.id
+                        ))
+                    })?,
+            )
+            .map_err(|error| ConnectionError::InvalidRequest(error.to_string()))?;
             let previous = columns_by_table
                 .entry(table_name.into())
                 .or_default()
-                .insert(object.name.as_str().into(), meta);
+                .insert(
+                    object.name.as_str().into(),
+                    MySqlReadColumn { meta, data_type },
+                );
             if previous.is_some() {
                 return Err(ConnectionError::InvalidRequest(format!(
                     "MySQL table {table_name} has duplicate column {}",
@@ -4815,8 +4870,13 @@ fn mysql_conversion_table_contract(
                 "MySQL conversion contract contains a non-MySQL column".into(),
             ));
         };
+        let read_column = MySqlReadColumn {
+            meta: column.target.clone(),
+            data_type: parse_mysql_column_type(&target_type.ddl_type()?)
+                .map_err(MySqlPlanError::InvalidCatalog)?,
+        };
         if columns
-            .insert(column.target.name.as_str().into(), column.target.clone())
+            .insert(column.target.name.as_str().into(), read_column)
             .is_some()
         {
             return Err(MySqlPlanError::InvalidCatalog(
@@ -8115,7 +8175,10 @@ mod tests {
             }
         );
         assert_eq!(definition.indexes[0].name, identifier("PRIMARY"));
-        assert_eq!(contract.columns["id"], policy.row_policy.columns[0].target);
+        assert_eq!(
+            contract.columns["id"].meta,
+            policy.row_policy.columns[0].target
+        );
         assert_eq!(contract.key.columns, vec![identifier("id")]);
         assert_eq!(contract.key.column_types, vec!["bigint"]);
         assert!(mysql_conversion_checks_are_exact(
@@ -8219,6 +8282,142 @@ mod tests {
             super::super::postgres::render_postgres_conversion_create_table(&hostile).unwrap(),
             "CREATE TABLE \"a\"\"b\".\"t\"\"x\" (\"id\" bigint NOT NULL CHECK (\"id\" BETWEEN -9223372036854775808 AND 9223372036854775807), PRIMARY KEY (\"id\"))"
         );
+    }
+
+    #[test]
+    fn mysql_catalog_preserves_unsigned_bigint_in_postgres_policy() {
+        let mut catalog = catalog(true);
+        let column = catalog.namespaces[0]
+            .objects
+            .iter_mut()
+            .find(|object| object.kind == CatalogObjectKind::Column)
+            .unwrap();
+        column
+            .attributes
+            .insert("column_type".into(), serde_json::json!("bigint unsigned"));
+        column.attributes.insert(
+            "mysql_ddl_type".into(),
+            serde_json::to_value(MySqlColumnType::Integer {
+                name: "bigint".into(),
+                unsigned: true,
+                display_width: None,
+            })
+            .unwrap(),
+        );
+        column
+            .attributes
+            .insert("numeric_precision".into(), serde_json::json!(20));
+
+        let policy = mysql_to_postgres_table_conversion_policy(
+            &catalog,
+            &QualifiedTable {
+                namespace: identifier("app"),
+                name: identifier("items"),
+            },
+            QualifiedTable {
+                namespace: identifier("public"),
+                name: identifier("items"),
+            },
+            QualifiedIdentifier {
+                namespace: identifier("pg_catalog"),
+                name: identifier("C"),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            policy.row_policy.columns[0].source_type,
+            super::super::conversion::CrossDialectSourceType::MySql(MySqlTargetType::Integer {
+                width: MySqlIntegerWidth::Big,
+                unsigned: true,
+            })
+        );
+        assert_eq!(
+            policy.row_policy.columns[0].target_type,
+            super::super::conversion::CrossDialectTargetType::PostgreSql(
+                super::super::conversion::PostgresTargetType::Numeric {
+                    precision: 20,
+                    scale: 0,
+                },
+            )
+        );
+        assert_eq!(
+            policy.row_policy.columns[0].rule,
+            super::super::conversion::ValueConversionRule::UnsignedIntegerToDecimal {
+                maximum: u64::MAX,
+                precision: 20,
+            }
+        );
+
+        let mut source = RowBatch::new(
+            vec![policy.row_policy.columns[0].source.clone()],
+            4,
+            usize::MAX,
+        );
+        for value in [
+            0_u128,
+            i64::MAX as u128,
+            i64::MAX as u128 + 1,
+            u64::MAX as u128,
+        ] {
+            source.try_push(vec![DbValue::Unsigned(value)], 0).unwrap();
+        }
+        assert_eq!(
+            policy.convert_batch(&source).unwrap().rows(),
+            &[
+                vec![DbValue::Decimal {
+                    coefficient: b"0".to_vec(),
+                    scale: 0,
+                }],
+                vec![DbValue::Decimal {
+                    coefficient: b"9223372036854775807".to_vec(),
+                    scale: 0,
+                }],
+                vec![DbValue::Decimal {
+                    coefficient: b"9223372036854775808".to_vec(),
+                    scale: 0,
+                }],
+                vec![DbValue::Decimal {
+                    coefficient: b"18446744073709551615".to_vec(),
+                    scale: 0,
+                }],
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_integer_decode_uses_the_reviewed_signedness() {
+        let column = ColumnMeta {
+            name: identifier("value"),
+            ordinal: 1,
+            vendor_type: "bigint".into(),
+            nullable: false,
+            collation: None,
+            precision: None,
+            scale: None,
+            timezone_semantics: None,
+        };
+        let unsigned = MySqlColumnType::Integer {
+            name: "bigint".into(),
+            unsigned: true,
+            display_width: None,
+        };
+        let signed = MySqlColumnType::Integer {
+            name: "bigint".into(),
+            unsigned: false,
+            display_width: None,
+        };
+
+        assert_eq!(
+            mysql_value(Value::Int(0), &column, &unsigned).unwrap(),
+            DbValue::Unsigned(0)
+        );
+        assert_eq!(
+            mysql_value(Value::UInt(i64::MAX as u64), &column, &signed).unwrap(),
+            DbValue::Signed(i128::from(i64::MAX))
+        );
+        assert!(mysql_value(Value::Int(-1), &column, &unsigned).is_err());
+        assert!(mysql_value(Value::UInt(i64::MAX as u64 + 1), &column, &signed).is_err());
     }
 
     fn foreign_key_snapshot(endpoint: &str) -> MySqlCatalogSnapshot {
@@ -9170,12 +9369,17 @@ mod tests {
             mysql_value(
                 Value::Bytes(br#"{"b":12,"a":9007199254740993}"#.to_vec()),
                 &column,
+                &MySqlColumnType::Json,
             )
             .unwrap(),
             DbValue::Json(br#"{"b":12,"a":9007199254740993}"#.to_vec())
         );
         assert!(matches!(
-            mysql_value(Value::Bytes(br#"{"a":1,"a":2}"#.to_vec()), &column),
+            mysql_value(
+                Value::Bytes(br#"{"a":1,"a":2}"#.to_vec()),
+                &column,
+                &MySqlColumnType::Json,
+            ),
             Err(ConnectionError::Database(_))
         ));
         assert_eq!(
