@@ -594,6 +594,8 @@ fn unmodeled_postgres_cross_dialect_objects(
                 .get("table_oid")
                 .and_then(serde_json::Value::as_str)
                 .and_then(|table_id| table_ids.get(table_id));
+            let is_selected_key =
+                table.is_some_and(|table| selected_keys.contains(&(table, &object.name)));
             let supported = match object.kind {
                 CatalogObjectKind::Table => mapped_tables.contains(&QualifiedTable {
                     namespace: namespace.name.clone(),
@@ -605,33 +607,55 @@ fn unmodeled_postgres_cross_dialect_objects(
                 CatalogObjectKind::PrimaryKey | CatalogObjectKind::UniqueConstraint => {
                     table.is_some_and(|table| selected_keys.contains(&(table, &object.name)))
                 }
-                CatalogObjectKind::Index => object
-                    .attributes
-                    .get("constraint_oid")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|constraint_id| {
-                        namespace.objects.iter().any(|constraint| {
-                            constraint.id == constraint_id
-                                && matches!(
-                                    constraint.kind,
-                                    CatalogObjectKind::PrimaryKey
-                                        | CatalogObjectKind::UniqueConstraint
-                                )
-                                && table.is_some_and(|table| {
-                                    selected_keys.contains(&(table, &constraint.name))
+                CatalogObjectKind::Index => {
+                    is_selected_key
+                        || object
+                            .attributes
+                            .get("constraint_oid")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|constraint_id| {
+                                namespace.objects.iter().any(|constraint| {
+                                    constraint.id == constraint_id
+                                        && matches!(
+                                            constraint.kind,
+                                            CatalogObjectKind::PrimaryKey
+                                                | CatalogObjectKind::UniqueConstraint
+                                        )
+                                        && table.is_some_and(|table| {
+                                            selected_keys.contains(&(table, &constraint.name))
+                                        })
                                 })
-                        })
-                    }),
+                            })
+                }
                 _ => false,
             };
             if !supported {
+                let non_unique_index = object.kind == CatalogObjectKind::Index
+                    && object
+                        .attributes
+                        .get("unique")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(false);
+                let table_identity = table
+                    .map(|table| format!("{}.{}", table.namespace, table.name))
+                    .unwrap_or_else(|| "<unknown table>".into());
                 unsupported.push(UnsupportedObject {
-                    code: UnsupportedObjectCode::MySqlCatalogSemantics,
+                    code: if non_unique_index {
+                        UnsupportedObjectCode::CrossDialectPerformanceIndex
+                    } else {
+                        UnsupportedObjectCode::MySqlCatalogSemantics
+                    },
                     object_id: object.id.clone(),
                     object_kind: "cross_dialect_source_semantics".into(),
-                    reason: "source object is outside the approved cross-dialect table subset"
-                        .into(),
-                    required_semantics: true,
+                    reason: if non_unique_index {
+                        format!(
+                            "non-unique secondary index {} on {} is not recreated by cross-dialect v1; target query performance may differ",
+                            object.name, table_identity
+                        )
+                    } else {
+                        "source object is outside the approved cross-dialect table subset".into()
+                    },
+                    required_semantics: !non_unique_index,
                 });
             }
         }
@@ -674,18 +698,46 @@ fn unmodeled_mysql_cross_dialect_objects(
                 CatalogObjectKind::PrimaryKey | CatalogObjectKind::UniqueConstraint => table
                     .as_ref()
                     .is_some_and(|table| selected_keys.contains(&(table, &object.name))),
+                CatalogObjectKind::Index => table
+                    .as_ref()
+                    .is_some_and(|table| selected_keys.contains(&(table, &object.name))),
                 _ => false,
             };
             if !supported
                 && !matches!(&object.kind, CatalogObjectKind::Vendor(kind) if kind == "mysql_privilege")
             {
+                let non_unique_index = object.kind == CatalogObjectKind::Index
+                    && object
+                        .attributes
+                        .get("non_unique")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true);
+                let table_identity = table
+                    .as_ref()
+                    .map(|table| format!("{}.{}", table.namespace, table.name))
+                    .unwrap_or_else(|| "<unknown table>".into());
                 unsupported.push(UnsupportedObject {
-                    code: UnsupportedObjectCode::MySqlCatalogSemantics,
+                    code: if non_unique_index {
+                        UnsupportedObjectCode::CrossDialectPerformanceIndex
+                    } else {
+                        UnsupportedObjectCode::MySqlCatalogSemantics
+                    },
                     object_id: object.id.clone(),
                     object_kind: "cross_dialect_source_semantics".into(),
-                    reason: "source object is outside the approved cross-dialect table subset"
-                        .into(),
-                    required_semantics: true,
+                    reason: if non_unique_index {
+                        format!(
+                            "non-unique secondary index {} on {} is not recreated by cross-dialect v1; target query performance may differ",
+                            object.name, table_identity
+                        )
+                    } else if object.kind == CatalogObjectKind::ForeignKey {
+                        format!(
+                            "foreign key {} is not recreated by cross-dialect v1; referential semantics are required",
+                            object.name
+                        )
+                    } else {
+                        "source object is outside the approved cross-dialect table subset".into()
+                    },
+                    required_semantics: !non_unique_index,
                 });
             }
         }
@@ -1206,9 +1258,15 @@ pub(crate) mod tests {
         assert!(create.dependencies.is_empty());
         assert_eq!(copy.kind, OperationKind::CopyTable);
         assert_eq!(copy.table.as_ref(), Some(&policy.source_table));
-        assert_eq!(copy.dependencies, [create.id.clone()]);
+        assert_eq!(
+            copy.dependencies.as_slice(),
+            std::slice::from_ref(&create.id)
+        );
         assert_eq!(verify.kind, OperationKind::VerifyTable);
-        assert_eq!(verify.dependencies, [copy.id.clone()]);
+        assert_eq!(
+            verify.dependencies.as_slice(),
+            std::slice::from_ref(&copy.id)
+        );
         assert_eq!(verify_schema.kind, OperationKind::VerifySchema);
         assert_eq!(
             verify_schema.dependencies,
@@ -1295,6 +1353,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn postgres_to_mysql_reports_a_secondary_index_without_blocking_copy() {
+        let mut source = postgres_snapshot("postgres://source/app", true);
+        let policy = postgres_to_mysql_table_conversion_policy(
+            &source.catalog,
+            &table("public", "items"),
+            table("app", "items"),
+            "utf8mb4",
+            "utf8mb4_0900_bin",
+        )
+        .unwrap();
+        source.catalog.namespaces[0].objects.push(CatalogObject {
+            id: "index:items_lookup_idx".into(),
+            kind: CatalogObjectKind::Index,
+            name: identifier("items_lookup_idx"),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([
+                ("table_oid".into(), serde_json::json!("relation:1")),
+                ("unique".into(), serde_json::json!(false)),
+            ]),
+        });
+
+        let finding = unmodeled_postgres_cross_dialect_objects(&source.catalog, &[policy])
+            .into_iter()
+            .find(|object| object.reason.contains("items_lookup_idx"))
+            .unwrap();
+        assert!(!finding.required_semantics);
+        assert_eq!(
+            finding.code,
+            UnsupportedObjectCode::CrossDialectPerformanceIndex
+        );
+        assert!(finding.reason.contains("public.items"));
+        assert!(finding.reason.contains("not recreated"));
+    }
+
+    #[test]
     fn mysql_to_postgres_builder_binds_authoritative_source_and_typed_graph() {
         let source = mysql_snapshot("mysql://source/app", true);
         let source_visibility = mysql_visibility(&source);
@@ -1332,6 +1425,105 @@ pub(crate) mod tests {
             Some(&source_visibility.authoritative_catalog)
         );
         assert!(reviewed.plan.mysql_target_snapshot_evidence.is_none());
+    }
+
+    #[test]
+    fn mysql_to_postgres_reports_a_secondary_index_without_blocking_copy() {
+        let mut source = mysql_snapshot("mysql://source/app", true);
+        source.catalog.namespaces[0].objects.push(CatalogObject {
+            id: mysql_catalog_id("index", "app", "items", "items_lookup_idx"),
+            kind: CatalogObjectKind::Index,
+            name: identifier("items_lookup_idx"),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([
+                ("table_name".into(), serde_json::json!("items")),
+                ("non_unique".into(), serde_json::json!(true)),
+                ("primary".into(), serde_json::json!(false)),
+                ("constraint_backed".into(), serde_json::json!(false)),
+                ("index_type".into(), serde_json::json!("BTREE")),
+                ("visible".into(), serde_json::json!(true)),
+                (
+                    "columns".into(),
+                    serde_json::json!([{
+                        "name": "id",
+                        "ordinal": 1,
+                        "ascending": true,
+                        "prefix_length": null,
+                        "nullable": false,
+                        "expression": null
+                    }]),
+                ),
+            ]),
+        });
+        source.catalog.namespaces[0]
+            .objects
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        source.snapshot_evidence.catalog_fingerprint =
+            mysql_catalog_fingerprint(&source.catalog).unwrap();
+        let source_visibility = mysql_visibility(&source);
+        let target = postgres_snapshot("postgres://target/app", false);
+        let mapping = CrossDialectMapping {
+            schema_version: CROSS_DIALECT_MAPPING_SCHEMA_VERSION,
+            source_dialect: ConversionDialect::MySql,
+            target_dialect: ConversionDialect::PostgreSql,
+            target_defaults: CrossDialectTargetDefaults::PostgreSql {
+                text_collation: QualifiedIdentifier {
+                    namespace: identifier("pg_catalog"),
+                    name: identifier("C"),
+                },
+            },
+            tables: vec![CrossDialectTableMapping {
+                source: table("app", "items"),
+                target: table("public", "items"),
+            }],
+        };
+
+        let reviewed =
+            build_mysql_to_postgres_plan(&source, &source_visibility, &target, &mapping).unwrap();
+        assert!(!reviewed.plan.unsupported_objects.blocks_execution());
+        let index_finding = reviewed
+            .plan
+            .unsupported_objects
+            .objects
+            .iter()
+            .find(|object| object.object_id.contains("index"))
+            .unwrap();
+        assert!(!index_finding.required_semantics);
+        assert!(index_finding.reason.contains("items_lookup_idx"));
+        assert!(index_finding.reason.contains("app.items"));
+        assert!(index_finding.reason.contains("not recreated"));
+    }
+
+    #[test]
+    fn mysql_to_postgres_keeps_foreign_keys_blocking() {
+        let mut catalog = mysql_catalog(true);
+        let policy = mysql_to_postgres_table_conversion_policy(
+            &catalog,
+            &table("app", "items"),
+            table("public", "items"),
+            QualifiedIdentifier {
+                namespace: identifier("pg_catalog"),
+                name: identifier("C"),
+            },
+        )
+        .unwrap();
+        catalog.namespaces[0].objects.push(CatalogObject {
+            id: mysql_catalog_id("foreign_key", "app", "items", "items_parent_fk"),
+            kind: CatalogObjectKind::ForeignKey,
+            name: identifier("items_parent_fk"),
+            definition: Vec::new(),
+            attributes: BTreeMap::from([("table_name".into(), serde_json::json!("items"))]),
+        });
+
+        let finding = unmodeled_mysql_cross_dialect_objects(&catalog, &[policy])
+            .into_iter()
+            .find(|object| object.reason.contains("items_parent_fk"))
+            .unwrap();
+        assert!(finding.required_semantics);
+        assert_eq!(finding.code, UnsupportedObjectCode::MySqlCatalogSemantics);
+        assert!(finding
+            .reason
+            .contains("referential semantics are required"));
     }
 
     #[test]

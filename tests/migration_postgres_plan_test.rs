@@ -314,6 +314,10 @@ fn live_postgres_blocking_code_registry_matrix() -> anyhow::Result<()> {
             UnsupportedObjectCode::MySqlAutoIncrementConsistency,
             "MySQL-specific AUTO_INCREMENT evidence is outside the PostgreSQL matrix",
         ),
+        (
+            UnsupportedObjectCode::CrossDialectPerformanceIndex,
+            "cross-dialect performance-index omissions are outside the PostgreSQL assessment matrix",
+        ),
     ];
     const NONBLOCKING_REPORT_REQUIRED: &[UnsupportedObjectCode] = &[
         UnsupportedObjectCode::NamespaceAcl,
