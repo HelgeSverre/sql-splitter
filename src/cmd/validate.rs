@@ -344,20 +344,7 @@ fn run_multi(
         println!("{}", serde_json::to_string_pretty(&aggregate)?);
     } else {
         eprintln!();
-        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        eprintln!("Validation Summary:");
-        eprintln!("  Total files: {}", run.total);
-        eprintln!("  Passed: {}", run.succeeded);
-        eprintln!("  Failed: {}", run.failed);
-        eprintln!("  Time: {:.3?}", run.elapsed);
-
-        if !run.errors.is_empty() {
-            eprintln!();
-            eprintln!("Failed files:");
-            for (path, error) in &run.errors {
-                eprintln!("  - {}: {}", path.display(), error);
-            }
-        }
+        run.print_summary("Validation Summary", "Passed", true);
 
         eprintln!();
         if all_passed {

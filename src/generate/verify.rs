@@ -60,7 +60,7 @@ use crate::synthetic::OutputMode;
 use super::output::{ProtectedSpool, SpoolReader, SpooledRow, TempConfig};
 use super::plan::{ColumnOwner, CompiledRelationship, GenerationPlan, PlannedTable};
 use super::registry::{PlannerPredicate, PredicateGuard};
-use super::value::{GenerateError, GeneratedValue};
+use super::value::{decimal_from_str, rescale, GenerateError, GeneratedValue};
 
 /// Nanoseconds per second; timestamps render at second precision, so equations
 /// are checked modulo one second.
@@ -1773,7 +1773,7 @@ impl<'a> Audit<'a> {
             if let Some((bytes, hash)) = key {
                 if !group
                     .index
-                    .insert(&bytes, hash)
+                    .add(&bytes, hash, true)
                     .map_err(membership_index_error)?
                 {
                     group.duplicate = true;
@@ -1784,13 +1784,15 @@ impl<'a> Audit<'a> {
             if let Some((bytes, hash)) = key {
                 group
                     .index
-                    .insert(&bytes, hash)
+                    .add(&bytes, hash, true)
                     .map_err(membership_index_error)?;
             }
         }
         for (index, key) in state.foreign_keys.iter_mut().zip(foreign_keys) {
             if let Some((bytes, hash)) = key {
-                index.append(&bytes, hash).map_err(membership_index_error)?;
+                index
+                    .add(&bytes, hash, false)
+                    .map_err(membership_index_error)?;
             }
         }
         for (col, value) in category_hits {
@@ -2543,7 +2545,7 @@ fn money_minor(value: &PkValue) -> Option<(i128, u32)> {
     match value {
         PkValue::Int(i) => Some((i128::from(*i), 0)),
         PkValue::BigInt(i) => Some((*i, 0)),
-        PkValue::Text(s) => parse_decimal(s.trim().trim_matches('\'')),
+        PkValue::Text(s) => decimal_from_str(s.trim().trim_matches('\'')),
         PkValue::Null => None,
     }
 }
@@ -2570,21 +2572,6 @@ fn decimal_fits(value: &PkValue, precision: u32, scale: u32) -> bool {
     rescaled.unsigned_abs() < limit
 }
 
-fn parse_decimal(text: &str) -> Option<(i128, u32)> {
-    let (sign, digits) = match text.strip_prefix('-') {
-        Some(rest) => (-1i128, rest),
-        None => (1, text),
-    };
-    match digits.split_once('.') {
-        Some((whole, frac)) => {
-            let scale = frac.len() as u32;
-            let combined = format!("{whole}{frac}");
-            combined.parse::<i128>().ok().map(|m| (sign * m, scale))
-        }
-        None => digits.parse::<i128>().ok().map(|m| (sign * m, 0)),
-    }
-}
-
 /// Add `add` into a running `(mantissa, scale)` accumulator, rescaling to the
 /// larger scale so mixed-scale renderings still sum exactly.
 fn add_minor(acc: &mut (i128, u32), add: (i128, u32)) {
@@ -2594,14 +2581,6 @@ fn add_minor(acc: &mut (i128, u32), add: (i128, u32)) {
     let a = rescale(acc.0, acc.1, scale).unwrap_or(i128::MAX);
     let b = rescale(add.0, add.1, scale).unwrap_or(i128::MAX);
     *acc = (a.saturating_add(b), scale);
-}
-
-/// Scale `mantissa` from `from` to `to` decimal places, or `None` if the
-/// widening overflows i128 (an absurdly wide scale gap or huge mantissa).
-fn rescale(mantissa: i128, from: u32, to: u32) -> Option<i128> {
-    10i128
-        .checked_pow(to - from)
-        .and_then(|factor| mantissa.checked_mul(factor))
 }
 
 /// Whether two `(mantissa, scale)` money values are numerically equal. An
@@ -2712,14 +2691,16 @@ impl KeySet {
         }
     }
 
-    /// Insert a key; returns `Ok(true)` if newly added, `Ok(false)` if an exact
-    /// duplicate was already present.
-    fn insert(&mut self, key: &[u8], hash: u64) -> io::Result<bool> {
+    /// Add a key. With `dedupe`, an exact duplicate already present (while
+    /// still in memory) is skipped and `Ok(false)` is returned; without it
+    /// duplicates are retained (child FK occurrences) and the result is always
+    /// `Ok(true)`.
+    fn add(&mut self, key: &[u8], hash: u64, dedupe: bool) -> io::Result<bool> {
         let mut spill = false;
         match &mut self.storage {
             KeyStorage::Memory(memory) => {
                 let bucket = memory.entry(hash).or_default();
-                if bucket.iter().any(|existing| existing.as_ref() == key) {
+                if dedupe && bucket.iter().any(|existing| existing.as_ref() == key) {
                     return Ok(false);
                 }
                 bucket.push(key.into());
@@ -2738,29 +2719,6 @@ impl KeySet {
             self.spill()?;
         }
         Ok(true)
-    }
-
-    /// Append a key while retaining duplicates, used for child FK occurrences.
-    fn append(&mut self, key: &[u8], hash: u64) -> io::Result<()> {
-        let mut spill = false;
-        match &mut self.storage {
-            KeyStorage::Memory(memory) => {
-                memory.entry(hash).or_default().push(key.into());
-                self.used += key.len() + 24;
-                spill = self.used > self.budget;
-            }
-            KeyStorage::UnsortedSpool(spool) => write_key(spool, hash, key)?,
-            KeyStorage::SortedMemory(_) | KeyStorage::SortedSpool(_) | KeyStorage::Empty => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "cannot append to a finalized key index",
-                ));
-            }
-        }
-        if spill {
-            self.spill()?;
-        }
-        Ok(())
     }
 
     /// Move the in-memory keys to a fresh protected spool and switch modes.
@@ -2946,7 +2904,7 @@ mod tests {
 
         for key in 0u64..256 {
             let bytes = key.to_le_bytes();
-            keys.insert(&bytes, key).unwrap();
+            keys.add(&bytes, key, true).unwrap();
         }
 
         assert_eq!(keys.spilled_memory_entries(), 0);
@@ -2964,14 +2922,14 @@ mod tests {
 
         for key in 0..count {
             let bytes = key.to_le_bytes();
-            unique.insert(&bytes, key).unwrap();
-            parents.insert(&bytes, key).unwrap();
-            children.append(&bytes, key).unwrap();
+            unique.add(&bytes, key, true).unwrap();
+            parents.add(&bytes, key, true).unwrap();
+            children.add(&bytes, key, false).unwrap();
         }
         unique
-            .insert(&(count - 1).to_le_bytes(), count - 1)
+            .add(&(count - 1).to_le_bytes(), count - 1, true)
             .unwrap();
-        children.append(&count.to_le_bytes(), count).unwrap();
+        children.add(&count.to_le_bytes(), count, false).unwrap();
 
         assert!(unique.finalize().unwrap(), "spilled duplicate was missed");
         assert!(!parents.finalize().unwrap());

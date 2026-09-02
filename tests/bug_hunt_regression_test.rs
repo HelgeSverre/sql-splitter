@@ -231,7 +231,7 @@ fn copy_backslash_decoded_before_requoting() {
     let pg = convert_copy_to_insert_values(field, SqlDialect::Postgres);
     assert_eq!(
         String::from_utf8_lossy(&pg),
-        "('C:\\Users\\bob')",
+        "(E'C:\\\\Users\\\\bob')",
         "postgres: COPY backslash not decoded"
     );
 

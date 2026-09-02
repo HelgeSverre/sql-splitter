@@ -16,11 +16,13 @@
 use crate::parser::mysql_insert::{
     parse_insert_tuple, FkRef, InsertRowContext, ParsedRow, PkTuple, PkValue, RowExtraction,
 };
-use crate::parser::postgres_copy::{parse_copy_columns, CopyParser, ParsedCopyRow};
+use crate::parser::postgres_copy::{
+    decode_copy_escapes, parse_copy_columns, CopyParser, ParsedCopyRow,
+};
 use crate::parser::{ContentFilter, Parser, ParserEvent, SqlDialect};
+use crate::render::sql_string::push_sql_literal;
 use crate::schema::{SchemaBuilder, SchemaGraph, TableSchema};
 use crate::splitter::{Splitter, Stats as SplitStats};
-use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -101,12 +103,6 @@ impl UnifiedRow {
 // streaming row visitors and `Parser::visit_events` can share it; re-exported
 // here so the sample/shard consumers keep their existing import path.
 pub use crate::parser::RowFlow;
-
-/// Returns true if `stmt` is a PostgreSQL COPY data block (ends with the
-/// `\.` terminator).
-pub fn is_copy_data_block(stmt: &[u8]) -> bool {
-    stmt.ends_with(b"\\.\n") || stmt.ends_with(b"\\.\r\n")
-}
 
 /// Walk every data row of a per-table SQL file, invoking `f` for each row.
 ///
@@ -246,23 +242,11 @@ pub fn split_to_temp_tables(
     // Get file size for progress tracking
     let file_size = std::fs::metadata(input)?.len();
 
-    // Progress bar setup - byte-based for the split phase
-    let progress_bar = if progress {
-        let pb = ProgressBar::new(file_size);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}",
-            )
-            .unwrap()
-            .progress_chars("█▓▒░  ")
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    let progress_bar = progress.then(|| {
+        let pb = crate::cmd::common::byte_progress_bar(file_size);
         pb.set_message("Splitting dump...");
-        Some(pb)
-    } else {
-        None
-    };
+        pb
+    });
 
     let temp_dir = TempDir::new()?;
     let tables_dir = temp_dir.path().join("tables");
@@ -509,90 +493,12 @@ pub fn convert_copy_to_insert_values(row: &[u8], dialect: SqlDialect) -> Vec<u8>
             // two characters backslash+n (and MySQL would double the backslash
             // into `\\n`), corrupting embedded newlines/tabs/backslashes.
             let decoded = decode_copy_escapes(field);
-            result.push(b'\'');
-            for &b in &decoded {
-                match b {
-                    b'\'' => {
-                        // Escape single quote
-                        match dialect {
-                            SqlDialect::MySql => result.extend_from_slice(b"\\'"),
-                            SqlDialect::Postgres | SqlDialect::Sqlite | SqlDialect::Mssql => {
-                                result.extend_from_slice(b"''")
-                            }
-                        }
-                    }
-                    b'\\' if dialect == SqlDialect::MySql => {
-                        // Escape backslash in MySQL
-                        result.extend_from_slice(b"\\\\");
-                    }
-                    _ => result.push(b),
-                }
-            }
-            result.push(b'\'');
+            push_sql_literal(&mut result, dialect, &decoded);
         }
     }
 
     result.push(b')');
     result
-}
-
-/// Decode PostgreSQL COPY text-format escape sequences in one field to the
-/// bytes they represent. Mirrors the decoder in `convert::copy_to_insert` but
-/// stays byte-oriented so binary/`bytea` data survives the round-trip.
-fn decode_copy_escapes(field: &[u8]) -> Vec<u8> {
-    // Fast path: no escapes at all -> the field is already the raw bytes.
-    if !field.contains(&b'\\') {
-        return field.to_vec();
-    }
-
-    let mut out = Vec::with_capacity(field.len());
-    let mut i = 0;
-    while i < field.len() {
-        if field[i] == b'\\' && i + 1 < field.len() {
-            let next = field[i + 1];
-            match next {
-                b'n' => out.push(b'\n'),
-                b'r' => out.push(b'\r'),
-                b't' => out.push(b'\t'),
-                b'\\' => out.push(b'\\'),
-                b'b' => out.push(0x08),
-                b'f' => out.push(0x0C),
-                b'v' => out.push(0x0B),
-                _ if next.is_ascii_digit() => {
-                    // Octal escape (\NNN, up to 3 digits).
-                    let mut val = 0u8;
-                    let mut consumed = 0;
-                    for j in 0..3 {
-                        match field.get(i + 1 + j) {
-                            Some(&d @ b'0'..=b'7') => {
-                                val = val.wrapping_mul(8).wrapping_add(d - b'0');
-                                consumed += 1;
-                            }
-                            _ => break,
-                        }
-                    }
-                    if consumed > 0 {
-                        out.push(val);
-                        i += 1 + consumed;
-                        continue;
-                    }
-                    // Not actually octal: keep the backslash and the byte.
-                    out.push(b'\\');
-                    out.push(next);
-                }
-                // Unknown escape: keep the backslash and the following byte.
-                _ => {
-                    out.push(b'\\');
-                    out.push(next);
-                }
-            }
-            i += 2;
-        } else {
-            out.push(field[i]);
-            i += 1;
-        }
-    }
-    out
 }
 
 /// Check if a byte slice represents a numeric value.
@@ -623,6 +529,213 @@ pub fn is_numeric(s: &[u8]) -> bool {
     }
 
     has_digit
+}
+
+// =============================================================================
+// Shared sample/shard configuration and output helpers
+// =============================================================================
+
+/// How to handle global/lookup tables
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GlobalTableMode {
+    /// Exclude global tables
+    None,
+    /// Include lookup tables in full (default)
+    #[default]
+    Lookups,
+    /// Include all global tables in full
+    All,
+}
+
+impl std::str::FromStr for GlobalTableMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" => Ok(GlobalTableMode::None),
+            "lookups" => Ok(GlobalTableMode::Lookups),
+            "all" => Ok(GlobalTableMode::All),
+            _ => Err(format!(
+                "Unknown global mode: {}. Valid options: none, lookups, all",
+                s
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for GlobalTableMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GlobalTableMode::None => write!(f, "none"),
+            GlobalTableMode::Lookups => write!(f, "lookups"),
+            GlobalTableMode::All => write!(f, "all"),
+        }
+    }
+}
+
+/// Well-known system table patterns (matched by prefix or exact name).
+pub const SYSTEM_TABLE_PATTERNS: &[&str] = &[
+    "migrations",
+    "failed_jobs",
+    "job_batches",
+    "jobs",
+    "cache",
+    "cache_locks",
+    "sessions",
+    "password_reset_tokens",
+    "personal_access_tokens",
+    "telescope_entries",
+    "telescope_entries_tags",
+    "telescope_monitoring",
+    "pulse_",
+    "horizon_",
+];
+
+/// Well-known lookup/global table names (matched exactly).
+pub const LOOKUP_TABLE_PATTERNS: &[&str] = &[
+    "countries",
+    "states",
+    "provinces",
+    "cities",
+    "currencies",
+    "languages",
+    "timezones",
+    "permissions",
+    "roles",
+    "settings",
+];
+
+/// True if `table_name` matches a well-known system table pattern.
+pub fn is_system_table(table_name: &str) -> bool {
+    let lower = table_name.to_lowercase();
+    SYSTEM_TABLE_PATTERNS
+        .iter()
+        .any(|p| lower.starts_with(p) || lower == *p)
+}
+
+/// True if `table_name` is a well-known lookup/global table.
+pub fn is_lookup_table(table_name: &str) -> bool {
+    let lower = table_name.to_lowercase();
+    LOOKUP_TABLE_PATTERNS.iter().any(|p| lower == *p)
+}
+
+/// `selected / seen` as a percentage, 0.0 when nothing was seen.
+pub fn percent(selected: u64, seen: u64) -> f64 {
+    if seen > 0 {
+        (selected as f64 / seen as f64) * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// One table's contribution to a sample/shard output file.
+pub struct OutputTable<'a> {
+    pub name: &'a str,
+    pub rows_selected: u64,
+    /// Spill file holding the selected rows; `None` writes schema only.
+    pub spill_path: Option<&'a Path>,
+}
+
+/// Write the shared trailer of a sample/shard output header comment.
+pub fn write_header_totals<W: Write + ?Sized>(
+    writer: &mut W,
+    rows_selected: u64,
+    rows_seen: u64,
+    fk_orphans_label: &str,
+    fk_orphans: u64,
+    warnings: &[String],
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "--   Total rows: {} (from {} original, {:.1}%)",
+        rows_selected,
+        rows_seen,
+        percent(rows_selected, rows_seen)
+    )?;
+    if fk_orphans > 0 {
+        writeln!(
+            writer,
+            "--   FK orphans {}: {}",
+            fk_orphans_label, fk_orphans
+        )?;
+    }
+    if !warnings.is_empty() {
+        writeln!(writer, "--   Warnings: {}", warnings.len())?;
+    }
+    writeln!(writer)
+}
+
+/// Write a complete sample/shard output: `header`, the dialect session header,
+/// each table's schema statements (copied from its split file), then its
+/// selected rows as chunked multi-row INSERTs, and the dialect footer.
+pub fn write_transform_output(
+    output: Option<&Path>,
+    dialect: SqlDialect,
+    include_schema: bool,
+    tables: &[OutputTable<'_>],
+    tables_dir: &Path,
+    header: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+) -> anyhow::Result<()> {
+    let mut writer: Box<dyn Write> = match output {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            Box::new(BufWriter::with_capacity(256 * 1024, File::create(path)?))
+        }
+        None => Box::new(BufWriter::new(std::io::stdout())),
+    };
+
+    header(&mut writer)?;
+    write_dialect_header(&mut writer, dialect)?;
+
+    if include_schema {
+        for table in tables {
+            let table_file = tables_dir.join(format!("{}.sql", table.name));
+            if !table_file.exists() {
+                continue;
+            }
+            let mut parser = Parser::with_dialect(File::open(&table_file)?, 64 * 1024, dialect);
+            while let Some(stmt) = parser.read_statement()? {
+                let (stmt_type, _) = Parser::<&[u8]>::parse_statement_with_dialect(&stmt, dialect);
+                if stmt_type.is_schema() {
+                    writer.write_all(&stmt)?;
+                    writer.write_all(b"\n")?;
+                }
+            }
+        }
+    }
+
+    const CHUNK_SIZE: usize = 1000;
+    let mut chunk: Vec<(RowFormat, Vec<u8>)> = Vec::with_capacity(CHUNK_SIZE);
+    for table in tables {
+        let Some(spill_path) = table.spill_path else {
+            continue;
+        };
+        writeln!(
+            writer,
+            "\n-- Data: {} ({} rows)",
+            table.name, table.rows_selected
+        )?;
+        let quoted_name = quote_ident(dialect, table.name);
+        let mut spill_reader = RowSpillReader::open(spill_path)?;
+        while let Some(row) = spill_reader.next_row()? {
+            chunk.push(row);
+            if chunk.len() >= CHUNK_SIZE {
+                write_insert_chunk(&mut writer, &quoted_name, &chunk, dialect)?;
+                chunk.clear();
+            }
+        }
+        if !chunk.is_empty() {
+            write_insert_chunk(&mut writer, &quoted_name, &chunk, dialect)?;
+            chunk.clear();
+        }
+    }
+
+    write_dialect_footer(&mut writer, dialect)?;
+    writer.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]

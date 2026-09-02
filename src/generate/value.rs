@@ -215,6 +215,66 @@ impl fmt::Display for GenerateError {
 
 impl std::error::Error for GenerateError {}
 
+/// Render `minor` units at `scale` decimal places as a fixed-point string,
+/// e.g. `(1050, 2)` -> `"10.50"`.
+pub(crate) fn format_decimal(minor: i128, scale: u32) -> String {
+    if scale == 0 {
+        return minor.to_string();
+    }
+    let negative = minor < 0;
+    let magnitude = minor.unsigned_abs();
+    let factor = 10u128.pow(scale);
+    let whole = magnitude / factor;
+    let frac = magnitude % factor;
+    let sign = if negative { "-" } else { "" };
+    format!("{sign}{whole}.{frac:0width$}", width = scale as usize)
+}
+
+/// Parse a decimal literal (`10`, `-10.5`, `"+3.140"`) into `(minor units,
+/// scale)`, e.g. `"10.50"` -> `(1050, 2)`.
+pub(crate) fn decimal_from_str(raw: &str) -> Option<(i128, u32)> {
+    let trimmed = raw.trim();
+    let (negative, unsigned) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+    let (int_part, frac_part) = match unsigned.split_once('.') {
+        Some((int_part, frac_part)) => (int_part, frac_part),
+        None => (unsigned, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    let scale = u32::try_from(frac_part.len()).ok()?;
+    let digits = format!("{int_part}{frac_part}");
+    let magnitude: i128 = digits.parse().ok()?;
+    Some((if negative { -magnitude } else { magnitude }, scale))
+}
+
+/// Rescale `minor` units from `from_scale` decimal places to `to_scale`, or
+/// `None` if the widening overflows i128 (an absurdly wide scale gap or huge
+/// mantissa). Narrowing truncates toward zero.
+pub(crate) fn rescale(minor: i128, from_scale: u32, to_scale: u32) -> Option<i128> {
+    if from_scale <= to_scale {
+        10i128
+            .checked_pow(to_scale - from_scale)
+            .and_then(|factor| minor.checked_mul(factor))
+    } else {
+        10i128
+            .checked_pow(from_scale - to_scale)
+            .map(|factor| minor / factor)
+    }
+}
+
+/// Emit a decimal-shaped value in whichever representation `family` expects:
+/// a [`GeneratedValue::Decimal`] for decimal columns, fixed-point text otherwise.
+pub(crate) fn decimal_value(family: &SqlTypeFamily, minor: i128, scale: u32) -> GeneratedValue {
+    match family {
+        SqlTypeFamily::Decimal => GeneratedValue::Decimal { minor, scale },
+        _ => GeneratedValue::Text(format_decimal(minor, scale)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

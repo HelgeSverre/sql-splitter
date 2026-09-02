@@ -319,50 +319,76 @@ enum CopyValue<'a> {
     Text(Cow<'a, [u8]>),
 }
 
-/// Decode PostgreSQL COPY escape sequences (`\t`, `\n`, `\r`, `\\`; a `\N`
-/// or unknown escape passes through verbatim).
+/// Decode PostgreSQL COPY text-format escape sequences (`\n \r \t \\ \b
+/// \f \v` and octal `\NNN`) to the bytes they represent. `\N` and any other
+/// unknown escape pass through verbatim.
 ///
-/// This is the canonical decoder for the COPY text wire format — consumers
-/// elsewhere in the crate (e.g. the redactor's `ValueRewriter` in
-/// `src/redactor/rewriter.rs`) should call this instead of keeping their own
-/// copy, so escape-handling fixes land in exactly one place.
-pub fn decode_copy_escapes(value: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(value.len());
-    let mut i = 0;
+/// This is the canonical decoder for the COPY text wire format; every COPY
+/// consumer in the crate must call this so escape-handling fixes land in
+/// exactly one place.
+pub fn decode_copy_escapes(field: &[u8]) -> Vec<u8> {
+    // Fast path: no escapes at all -> the field is already the raw bytes.
+    if !field.contains(&b'\\') {
+        return field.to_vec();
+    }
 
-    while i < value.len() {
-        if value[i] == b'\\' && i + 1 < value.len() {
-            let next = value[i + 1];
-            let decoded = match next {
-                b'n' => b'\n',
-                b'r' => b'\r',
-                b't' => b'\t',
-                b'\\' => b'\\',
-                b'N' => {
-                    // \N is the NULL marker, not an escape; callers filter it
-                    // out before decoding, so keep it verbatim here.
-                    result.push(b'\\');
-                    result.push(b'N');
-                    i += 2;
+    let mut out = Vec::with_capacity(field.len());
+    let mut i = 0;
+    while i < field.len() {
+        if field[i] == b'\\' && i + 1 < field.len() {
+            let next = field[i + 1];
+            match next {
+                b'n' => out.push(b'\n'),
+                b'r' => out.push(b'\r'),
+                b't' => out.push(b'\t'),
+                b'\\' => out.push(b'\\'),
+                b'b' => out.push(0x08),
+                b'f' => out.push(0x0C),
+                b'v' => out.push(0x0B),
+                b'0'..=b'7' => {
+                    // Octal escape (\NNN, up to 3 digits).
+                    let mut val = 0u8;
+                    let mut consumed = 0;
+                    while consumed < 3 {
+                        match field.get(i + 1 + consumed) {
+                            Some(&d @ b'0'..=b'7') => {
+                                val = val.wrapping_mul(8).wrapping_add(d - b'0');
+                                consumed += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                    out.push(val);
+                    i += 1 + consumed;
                     continue;
                 }
+                // Unknown escape (including the `\N` NULL marker): keep the
+                // backslash and the following byte.
                 _ => {
-                    // Unknown escape, keep as-is
-                    result.push(b'\\');
-                    result.push(next);
-                    i += 2;
-                    continue;
+                    out.push(b'\\');
+                    out.push(next);
                 }
-            };
-            result.push(decoded);
+            }
             i += 2;
         } else {
-            result.push(value[i]);
+            out.push(field[i]);
             i += 1;
         }
     }
+    out
+}
 
-    result
+/// The PostgreSQL `COPY` text-format escape for one byte, if it needs one:
+/// backslash, tab, newline and carriage return; everything else (including
+/// `'`) is copied through unquoted.
+pub fn copy_escape(b: u8) -> Option<&'static str> {
+    match b {
+        b'\\' => Some("\\\\"),
+        b'\t' => Some("\\t"),
+        b'\n' => Some("\\n"),
+        b'\r' => Some("\\r"),
+        _ => None,
+    }
 }
 
 /// True when `s` is the canonical decimal rendering of an integer — digits

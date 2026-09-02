@@ -98,6 +98,32 @@ impl<P> MultiRun<P> {
     pub fn has_failures(&self) -> bool {
         self.failed > 0
     }
+
+    /// Print the text-mode batch summary (`to_stderr` selects the stream).
+    pub fn print_summary(&self, title: &str, ok_label: &str, to_stderr: bool) {
+        let mut lines = vec![
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".to_string(),
+            format!("{title}:"),
+            format!("  Total files: {}", self.total),
+            format!("  {ok_label}: {}", self.succeeded),
+            format!("  Failed: {}", self.failed),
+            format!("  Time: {:.3?}", self.elapsed),
+        ];
+        if !self.errors.is_empty() {
+            lines.push(String::new());
+            lines.push("Failed files:".to_string());
+            for (path, error) in &self.errors {
+                lines.push(format!("  - {}: {}", path.display(), error));
+            }
+        }
+        for line in lines {
+            if to_stderr {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+        }
+    }
 }
 
 /// Drive a multi-file (glob) command run: iterate `files`, delegate each file

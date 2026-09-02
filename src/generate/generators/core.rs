@@ -18,8 +18,7 @@ use rand_chacha::ChaCha8Rng;
 use crate::diagnostic::DiagnosticBag;
 use crate::synthetic::model::{GeneratorConfig, ModifierConfig};
 use crate::synthetic::schema::{
-    declared_character_length, PortableColumn, PortableTable, SqlTypeFamily,
-    MAX_GENERATED_DECIMAL_SCALE,
+    declared_character_length, SqlTypeFamily, MAX_GENERATED_DECIMAL_SCALE,
 };
 
 use crate::generate::registry::{
@@ -27,29 +26,13 @@ use crate::generate::registry::{
     Determinism, ExtensionRegistry, GeneratorDescriptor, GeneratorFactory, KeyRecipe,
     ModifierDescriptor, ModifierFactory, RowContext, Verification,
 };
-use crate::generate::seed::StreamId;
-use crate::generate::value::{GenerateError, GeneratedValue};
+use crate::generate::value::{
+    decimal_from_str, format_decimal, rescale, GenerateError, GeneratedValue,
+};
+
+use super::{column, display_yaml, find_column, parse_f64, parse_i128, parse_usize, stream};
 
 // --- Shared helpers ----------------------------------------------------------
-
-/// The column an operator is compiled against. Every generator and modifier
-/// in this module is column-scoped, so the compiler always builds its
-/// `CompileContext` with [`CompileContext::for_column`]; a missing column would
-/// be a caller bug, not a data problem, hence the `expect`.
-fn column<'a>(context: &CompileContext<'a>) -> &'a PortableColumn {
-    context
-        .column()
-        .expect("core generators and modifiers are column-scoped")
-}
-
-/// The deterministic RNG stream for a column-scoped operator, keyed by
-/// table, column, and the operator's own kind so two different generators on
-/// the same column never share a stream.
-fn stream(context: &CompileContext<'_>, kind: &str) -> ChaCha8Rng {
-    let table = context.table().name.clone();
-    let col = column(context).name.clone();
-    context.rng(StreamId::column(table, col, kind.to_string()))
-}
 
 /// Render any [`GeneratedValue`] as the text a `template`/`format` operator
 /// substitutes into its output.
@@ -96,21 +79,6 @@ fn slugify(input: &str, max_length: Option<usize>) -> String {
     slug
 }
 
-/// Render `minor` units at `scale` decimal places as a fixed-point string,
-/// e.g. `(1050, 2)` -> `"10.50"`.
-fn format_decimal(minor: i128, scale: u32) -> String {
-    if scale == 0 {
-        return minor.to_string();
-    }
-    let negative = minor < 0;
-    let magnitude = minor.unsigned_abs();
-    let factor = 10u128.pow(scale);
-    let whole = magnitude / factor;
-    let frac = magnitude % factor;
-    let sign = if negative { "-" } else { "" };
-    format!("{sign}{whole}.{frac:0width$}", width = scale as usize)
-}
-
 /// A stable, order-independent key for tracking which values the `unique`
 /// modifier has already emitted. `GeneratedValue` has no `Hash`/`Eq` impl (it
 /// deliberately avoids one so its `Decimal`/float-adjacent variants aren't
@@ -130,44 +98,6 @@ fn value_key(value: &GeneratedValue) -> String {
     }
 }
 
-/// Minimal YAML -> string rendering for scalar config values (used for
-/// literal template fragments and `display`-style coercion).
-fn display_yaml(value: &serde_yaml_ng::Value) -> String {
-    match value {
-        serde_yaml_ng::Value::Null => String::new(),
-        serde_yaml_ng::Value::Bool(b) => b.to_string(),
-        serde_yaml_ng::Value::Number(n) => n.to_string(),
-        serde_yaml_ng::Value::String(s) => s.clone(),
-        other => serde_yaml_ng::to_string(other)
-            .unwrap_or_default()
-            .trim_end()
-            .to_string(),
-    }
-}
-
-fn parse_i128(value: &serde_yaml_ng::Value) -> Option<i128> {
-    match value {
-        serde_yaml_ng::Value::Number(n) => n
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| n.as_f64().map(|f| f as i128)),
-        serde_yaml_ng::Value::String(s) => s.trim().parse::<i128>().ok(),
-        _ => None,
-    }
-}
-
-fn parse_f64(value: &serde_yaml_ng::Value) -> Option<f64> {
-    match value {
-        serde_yaml_ng::Value::Number(n) => n.as_f64(),
-        serde_yaml_ng::Value::String(s) => s.trim().parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
-fn parse_usize(value: &serde_yaml_ng::Value) -> Option<usize> {
-    parse_i128(value).and_then(|n| usize::try_from(n).ok())
-}
-
 /// Parse a decimal literal (`10`, `10.5`, `"-3.140"`) into `(minor units,
 /// scale)`, e.g. `"10.50"` -> `(1050, 2)`.
 pub(super) fn parse_decimal(value: &serde_yaml_ng::Value) -> Option<(i128, u32)> {
@@ -181,25 +111,6 @@ pub(super) fn parse_decimal(value: &serde_yaml_ng::Value) -> Option<(i128, u32)>
         serde_yaml_ng::Value::String(s) => decimal_from_str(s),
         _ => None,
     }
-}
-
-fn decimal_from_str(raw: &str) -> Option<(i128, u32)> {
-    let trimmed = raw.trim();
-    let (negative, unsigned) = match trimmed.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
-    };
-    let (int_part, frac_part) = match unsigned.split_once('.') {
-        Some((int_part, frac_part)) => (int_part, frac_part),
-        None => (unsigned, ""),
-    };
-    if int_part.is_empty() && frac_part.is_empty() {
-        return None;
-    }
-    let scale = u32::try_from(frac_part.len()).ok()?;
-    let digits = format!("{int_part}{frac_part}");
-    let magnitude: i128 = digits.parse().ok()?;
-    Some((if negative { -magnitude } else { magnitude }, scale))
 }
 
 fn json_from_yaml(value: &serde_yaml_ng::Value) -> Result<String, String> {
@@ -716,10 +627,6 @@ impl GeneratorFactory for CopyFactory {
     }
 }
 
-fn find_column<'a>(table: &'a PortableTable, name: &str) -> Option<&'a PortableColumn> {
-    table.columns.iter().find(|c| c.name == name)
-}
-
 /// The `template` generator: joins literal fragments with sibling-column
 /// substitutions. It does not evaluate conditions or expressions — only
 /// literal text and `{ field: <name> }` references.
@@ -1142,14 +1049,14 @@ impl GeneratorFactory for DecimalFactory {
             .args
             .get("min")
             .and_then(parse_decimal)
-            .map_or(0, |(minor, from_scale)| rescale(minor, from_scale, scale));
+            .and_then(|(minor, from_scale)| rescale(minor, from_scale, scale))
+            .unwrap_or(0);
         let max_minor = config
             .args
             .get("max")
             .and_then(parse_decimal)
-            .map_or(1000 * factor, |(minor, from_scale)| {
-                rescale(minor, from_scale, scale)
-            });
+            .and_then(|(minor, from_scale)| rescale(minor, from_scale, scale))
+            .unwrap_or(1000 * factor);
         if min_minor > max_minor {
             bag.error(
                 crate::diagnostic::codes::DECIMAL_RANGE.code,
@@ -1170,18 +1077,6 @@ impl GeneratorFactory for DecimalFactory {
                 rng,
             }))) as Box<dyn CompiledGenerator>,
         )
-    }
-}
-
-/// Rescale `minor` units from `from_scale` decimal places to `to_scale`.
-fn rescale(minor: i128, from_scale: u32, to_scale: u32) -> i128 {
-    if from_scale == to_scale {
-        return minor;
-    }
-    if from_scale < to_scale {
-        minor * 10i128.pow(to_scale - from_scale)
-    } else {
-        minor / 10i128.pow(from_scale - to_scale)
     }
 }
 

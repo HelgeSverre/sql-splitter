@@ -38,7 +38,8 @@
 //! order — regardless of which branch a row lands in — so a seeded run
 //! reproduces exactly.
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
 use serde_yaml_ng::Value;
@@ -46,15 +47,18 @@ use serde_yaml_ng::Value;
 use crate::diagnostic::DiagnosticBag;
 use crate::generate::registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism,
-    PlannerDescriptor, PlannerFactory, PlannerPredicate, PredicateGuard, Verification,
+    PlannerDescriptor, PlannerPredicate, PredicateGuard, Verification,
 };
 use crate::generate::seed::StreamId;
-use crate::generate::value::{GenerateError, GeneratedValue};
+use crate::generate::value::{decimal_value, GenerateError, GeneratedValue};
 use crate::synthetic::model::PlannerConfig;
-use crate::synthetic::schema::{PortableColumn, PortableTable, SqlTypeFamily};
+use crate::synthetic::schema::{PortableColumn, SqlTypeFamily};
 
-/// Nanoseconds per second, the base unit conversion for every offset.
-const NANOS_PER_SECOND: i128 = 1_000_000_000;
+use super::{
+    as_f64, as_i128, as_instant_ns, column_nullable, find_column, number_list, planner_factory,
+    render_integer, render_status, resolve_role, role_name, string_list, unit_nanos,
+    NANOS_PER_SECOND,
+};
 
 // =============================================================================
 // Shared draws
@@ -64,7 +68,7 @@ const NANOS_PER_SECOND: i128 = 1_000_000_000;
 /// point" column (`temporal.timestamps`'s `created`, `temporal.soft_delete`'s
 /// `deleted_range`, `temporal.lifecycle`'s `start`).
 #[derive(Clone, Copy)]
-enum InstantDraw {
+pub(super) enum InstantDraw {
     /// A uniformly random instant in the inclusive `[min_ns, max_ns]` range.
     Range { min_ns: i128, max_ns: i128 },
     /// A strictly increasing instant: row `n` starts at `min_ns + n * step_ns`.
@@ -72,7 +76,7 @@ enum InstantDraw {
 }
 
 impl InstantDraw {
-    fn draw(&self, rng: &mut ChaCha8Rng, row_index: u64) -> i128 {
+    pub(super) fn draw(&self, rng: &mut ChaCha8Rng, row_index: u64) -> i128 {
         match *self {
             InstantDraw::Range { min_ns, max_ns } => rng.random_range(min_ns..=max_ns),
             InstantDraw::Monotonic { min_ns, step_ns } => {
@@ -108,7 +112,7 @@ impl OffsetDraw {
 /// Compile an `{ kind, min, max }` / `{ kind: monotonic, min, step_seconds }`
 /// block into an [`InstantDraw`]. Shared by `created`, `deleted_range`, and
 /// `start`.
-fn compile_instant_block(
+pub(super) fn compile_instant_block(
     block: Option<&Value>,
     planner: &str,
     code: &'static str,
@@ -195,7 +199,7 @@ fn compile_offset_block(
                 .and_then(|b| b.get("value"))
                 .and_then(as_i128)
                 .unwrap_or(0);
-            check_nonneg_bounded(value, unit_nanos, planner, code, path, bag);
+            check_nonneg_bounded(value, unit_nanos, planner, "offset", code, path, bag);
             OffsetDraw::Fixed(value)
         }
         // `uniform`, or an omitted kind.
@@ -208,8 +212,8 @@ fn compile_offset_block(
                 .and_then(|b| b.get("max"))
                 .and_then(as_i128)
                 .unwrap_or(min);
-            check_nonneg_bounded(min, unit_nanos, planner, code, path, bag);
-            check_nonneg_bounded(max, unit_nanos, planner, code, path, bag);
+            check_nonneg_bounded(min, unit_nanos, planner, "offset", code, path, bag);
+            check_nonneg_bounded(max, unit_nanos, planner, "offset", code, path, bag);
             if max < min {
                 bag.error(
                     code,
@@ -223,11 +227,13 @@ fn compile_offset_block(
     Some((draw, unit_nanos))
 }
 
-/// Report a negative offset bound or one whose nanosecond span overflows.
-fn check_nonneg_bounded(
+/// Report a negative `noun` (offset/duration) bound or one whose nanosecond
+/// span overflows.
+pub(super) fn check_nonneg_bounded(
     units: i128,
     unit_nanos: i128,
     planner: &str,
+    noun: &str,
     code: &'static str,
     path: &str,
     bag: &mut DiagnosticBag,
@@ -236,14 +242,14 @@ fn check_nonneg_bounded(
         bag.error(
             code,
             path.to_string(),
-            format!("{planner} offset `{units}` is negative; offsets must be >= 0"),
+            format!("{planner} {noun} `{units}` is negative; {noun}s must be >= 0"),
         );
     } else if units.checked_mul(unit_nanos).is_none() {
         bag.error(
             code,
             path.to_string(),
             format!(
-                "{planner} offset `{units}` overflows the representable nanosecond range at this unit"
+                "{planner} {noun} `{units}` overflows the representable nanosecond range at this unit"
             ),
         );
     }
@@ -269,28 +275,48 @@ fn offset_overflow(step: &str) -> GenerateError {
 // Rendering
 // =============================================================================
 
-/// Render an epoch-nanosecond instant to UTC wall-clock text, in the
+/// How instants are rendered to wall-clock text.
+pub(super) enum RenderZone {
+    /// Render UTC wall clock with no offset (`preserve` keeps the observed
+    /// zone; with no observed original zone it renders as UTC).
+    Utc,
+    /// Render the wall clock of a named IANA zone, DST-aware, with an explicit
+    /// offset so the absolute instant round-trips.
+    Named(Tz),
+}
+
+/// Render an epoch-nanosecond instant to a wall-clock literal in `zone`, in the
 /// representation `family` expects.
-fn render_instant(
+pub(super) fn render_instant(
     instant_ns: i128,
+    zone: &RenderZone,
     family: &SqlTypeFamily,
 ) -> Result<GeneratedValue, GenerateError> {
-    let text = format_instant(instant_ns)?;
+    let text = format_instant(instant_ns, zone)?;
     Ok(match family {
         SqlTypeFamily::DateTime => GeneratedValue::DateTime(text),
         _ => GeneratedValue::Text(text),
     })
 }
 
-/// Format an epoch-nanosecond instant as UTC wall-clock text. An instant
+/// Format an epoch-nanosecond instant as wall-clock text in `zone`. An instant
 /// outside chrono's representable timestamp range is an error rather than a
 /// silent fallback to the 1970 epoch (which would break ordering invariants).
-fn format_instant(instant_ns: i128) -> Result<String, GenerateError> {
+fn format_instant(instant_ns: i128, zone: &RenderZone) -> Result<String, GenerateError> {
     let secs = instant_ns.div_euclid(NANOS_PER_SECOND);
     let nanos = instant_ns.rem_euclid(NANOS_PER_SECOND) as u32;
     let secs = i64::try_from(secs).map_err(|_| instant_overflow())?;
     let utc = DateTime::<Utc>::from_timestamp(secs, nanos).ok_or_else(instant_overflow)?;
-    Ok(utc.format("%Y-%m-%d %H:%M:%S").to_string())
+    Ok(match zone {
+        RenderZone::Utc => utc.format("%Y-%m-%d %H:%M:%S").to_string(),
+        // Include the offset for a named zone so the absolute instant round-
+        // trips even across a DST transition (the offset disambiguates the
+        // repeated wall-clock hour).
+        RenderZone::Named(tz) => utc
+            .with_timezone(tz)
+            .format("%Y-%m-%d %H:%M:%S%:z")
+            .to_string(),
+    })
 }
 
 fn instant_overflow() -> GenerateError {
@@ -300,107 +326,11 @@ fn instant_overflow() -> GenerateError {
 }
 
 /// Render a boolean flag in the representation `family` expects.
-fn render_flag(flag: bool, family: &SqlTypeFamily) -> GeneratedValue {
+pub(super) fn render_flag(flag: bool, family: &SqlTypeFamily) -> GeneratedValue {
     match family {
         SqlTypeFamily::Boolean => GeneratedValue::Boolean(flag),
         SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => GeneratedValue::Integer(flag as i128),
         _ => GeneratedValue::Text(flag.to_string()),
-    }
-}
-
-/// Render a status label in the representation `family` expects.
-fn render_status(status: &str, _family: &SqlTypeFamily) -> GeneratedValue {
-    GeneratedValue::Text(status.to_string())
-}
-
-// =============================================================================
-// Value parsing helpers
-// =============================================================================
-
-fn unit_nanos(unit: &str) -> Option<i128> {
-    let nanos = match unit {
-        "nanosecond" | "nanoseconds" | "ns" => 1,
-        "microsecond" | "microseconds" | "us" => 1_000,
-        "millisecond" | "milliseconds" | "ms" => 1_000_000,
-        "second" | "seconds" | "sec" | "s" => NANOS_PER_SECOND,
-        "minute" | "minutes" | "min" => 60 * NANOS_PER_SECOND,
-        "hour" | "hours" | "hr" | "h" => 3_600 * NANOS_PER_SECOND,
-        "day" | "days" | "d" => 86_400 * NANOS_PER_SECOND,
-        _ => return None,
-    };
-    Some(nanos)
-}
-
-fn as_i128(value: &Value) -> Option<i128> {
-    match value {
-        Value::Number(number) => number
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| number.as_u64().map(i128::from))
-            .or_else(|| number.as_f64().map(|float| float as i128)),
-        Value::String(text) => text.trim().parse::<i128>().ok(),
-        _ => None,
-    }
-}
-
-fn as_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
-/// Parse a timestamp value into epoch nanoseconds. Accepts RFC 3339
-/// (`2024-01-01T00:00:00Z`), space- or `T`-separated naive timestamps, and bare
-/// dates (interpreted as UTC midnight).
-fn as_instant_ns(value: &Value) -> Option<i128> {
-    let text = value.as_str()?.trim();
-    if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
-        return Some(
-            i128::from(dt.timestamp()) * NANOS_PER_SECOND + i128::from(dt.timestamp_subsec_nanos()),
-        );
-    }
-    for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
-        if let Ok(naive) = NaiveDateTime::parse_from_str(text, format) {
-            return Some(i128::from(naive.and_utc().timestamp()) * NANOS_PER_SECOND);
-        }
-    }
-    NaiveDate::parse_from_str(text, "%Y-%m-%d")
-        .ok()
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-        .map(|naive| i128::from(naive.and_utc().timestamp()) * NANOS_PER_SECOND)
-}
-
-fn role_name<'a>(columns: Option<&'a Value>, role: &str) -> Option<&'a str> {
-    columns?.get(role).and_then(Value::as_str)
-}
-
-fn find_column<'a>(table: &'a PortableTable, name: &str) -> Option<&'a PortableColumn> {
-    table.columns.iter().find(|column| column.name == name)
-}
-
-fn column_nullable(table: &PortableTable, name: &str) -> bool {
-    find_column(table, name).is_some_and(|column| column.nullable)
-}
-
-/// Parse a YAML value into a list of strings (from a sequence of scalars).
-fn string_list(value: Option<&Value>) -> Vec<String> {
-    match value {
-        Some(Value::Sequence(items)) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Parse a YAML sequence of numbers into a list of `f64` weights.
-fn number_list(value: Option<&Value>) -> Option<Vec<f64>> {
-    match value {
-        Some(Value::Sequence(items)) => items.iter().map(as_f64).collect(),
-        _ => None,
     }
 }
 
@@ -446,20 +376,11 @@ pub static TEMPORAL_TIMESTAMPS_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor
 /// Factory for the `temporal.timestamps` planner.
 pub struct TemporalTimestampsFactory;
 
-impl PlannerFactory for TemporalTimestampsFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &TEMPORAL_TIMESTAMPS_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_timestamps(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    TemporalTimestampsFactory,
+    TEMPORAL_TIMESTAMPS_DESCRIPTOR,
+    compile_timestamps
+);
 
 /// A resolved trailing "other" timestamp column, drawn from its own stream as
 /// `created + offset`.
@@ -497,13 +418,13 @@ impl CompiledPlanner for TemporalTimestampsPlanner {
         let update_offset = self.update_delay.draw(&mut self.update_rng);
         let updated_ns = add_offset(created_ns, update_offset, self.update_unit_nanos)?;
 
-        output[0] = render_instant(created_ns, &self.created_family)?;
-        output[1] = render_instant(updated_ns, &self.updated_family)?;
+        output[0] = render_instant(created_ns, &RenderZone::Utc, &self.created_family)?;
+        output[1] = render_instant(updated_ns, &RenderZone::Utc, &self.updated_family)?;
 
         for (slot, other) in output[2..].iter_mut().zip(self.others.iter_mut()) {
             let offset = self.other_delay.draw(&mut other.rng);
             let other_ns = add_offset(created_ns, offset, self.other_unit_nanos)?;
-            *slot = render_instant(other_ns, &other.family)?;
+            *slot = render_instant(other_ns, &RenderZone::Utc, &other.family)?;
         }
         Ok(())
     }
@@ -525,8 +446,26 @@ fn compile_timestamps(
     let path = context.path();
     let columns = config.args.get("columns");
 
-    let created_col = resolve_required(columns, "created_at", table, path, CODE, &mut bag);
-    let updated_col = resolve_required(columns, "updated_at", table, path, CODE, &mut bag);
+    let created_col = resolve_role(
+        columns,
+        "created_at",
+        table,
+        path,
+        TEMPORAL_TIMESTAMPS_DESCRIPTOR.kind,
+        CODE,
+        true,
+        &mut bag,
+    );
+    let updated_col = resolve_role(
+        columns,
+        "updated_at",
+        table,
+        path,
+        TEMPORAL_TIMESTAMPS_DESCRIPTOR.kind,
+        CODE,
+        true,
+        &mut bag,
+    );
     // Every `columns` entry beyond `created_at`/`updated_at` is a trailing
     // "other" timestamp, keyed by an arbitrary role name — kept as a flat
     // mapping (not a nested `others:` list) so the pre-compile column-ownership
@@ -661,38 +600,6 @@ fn compile_timestamps(
     })
 }
 
-/// Resolve a required column role to its schema column, reporting a missing
-/// role or a role naming an absent column.
-fn resolve_required<'a>(
-    columns: Option<&Value>,
-    role: &str,
-    table: &'a PortableTable,
-    path: &str,
-    code: &'static str,
-    bag: &mut DiagnosticBag,
-) -> Option<&'a PortableColumn> {
-    let Some(name) = role_name(columns, role) else {
-        bag.error(
-            code,
-            format!("{path}.columns.{role}"),
-            format!("requires a `{role}` column under `columns`"),
-        );
-        return None;
-    };
-    let column = find_column(table, name);
-    if column.is_none() {
-        bag.error(
-            code,
-            format!("{path}.columns.{role}"),
-            format!(
-                "`{role}` column `{name}` does not exist on table `{}`",
-                table.name
-            ),
-        );
-    }
-    column
-}
-
 // =============================================================================
 // temporal.soft_delete
 // =============================================================================
@@ -737,20 +644,11 @@ pub static TEMPORAL_SOFT_DELETE_DESCRIPTOR: PlannerDescriptor = PlannerDescripto
 /// Factory for the `temporal.soft_delete` planner.
 pub struct TemporalSoftDeleteFactory;
 
-impl PlannerFactory for TemporalSoftDeleteFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &TEMPORAL_SOFT_DELETE_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_soft_delete(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    TemporalSoftDeleteFactory,
+    TEMPORAL_SOFT_DELETE_DESCRIPTOR,
+    compile_soft_delete
+);
 
 struct FlagColumn {
     name: String,
@@ -785,7 +683,7 @@ impl CompiledPlanner for TemporalSoftDeletePlanner {
         let is_deleted = self.deletion_probability > 0.0 && decision < self.deletion_probability;
 
         output[0] = if is_deleted {
-            render_instant(deleted_ns, &self.deleted_at_family)?
+            render_instant(deleted_ns, &RenderZone::Utc, &self.deleted_at_family)?
         } else {
             GeneratedValue::Null
         };
@@ -818,7 +716,16 @@ fn compile_soft_delete(
     let path = context.path();
     let columns = config.args.get("columns");
 
-    let deleted_col = resolve_required(columns, "deleted_at", table, path, CODE, &mut bag);
+    let deleted_col = resolve_role(
+        columns,
+        "deleted_at",
+        table,
+        path,
+        TEMPORAL_SOFT_DELETE_DESCRIPTOR.kind,
+        CODE,
+        true,
+        &mut bag,
+    );
     let flag_col = role_name(columns, "is_deleted").and_then(|name| {
         find_column(table, name).or_else(|| {
             bag.error(
@@ -999,20 +906,11 @@ pub static TEMPORAL_LIFECYCLE_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor 
 /// Factory for the `temporal.lifecycle` planner.
 pub struct TemporalLifecycleFactory;
 
-impl PlannerFactory for TemporalLifecycleFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &TEMPORAL_LIFECYCLE_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_lifecycle(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    TemporalLifecycleFactory,
+    TEMPORAL_LIFECYCLE_DESCRIPTOR,
+    compile_lifecycle
+);
 
 /// A state timestamp column mapped to its position in the legal chain.
 struct StateSlot {
@@ -1024,7 +922,6 @@ struct StateSlot {
 
 struct TemporalLifecyclePlanner {
     writes: Vec<String>,
-    status_family: SqlTypeFamily,
     states: Vec<String>,
     /// Normalized terminal-state weights, parallel to `states`.
     weights: Vec<f64>,
@@ -1067,10 +964,10 @@ impl CompiledPlanner for TemporalLifecyclePlanner {
 
         let terminal_index = pick_weighted_index(&self.weights, terminal_pick);
 
-        output[0] = render_status(&self.states[terminal_index], &self.status_family);
+        output[0] = render_status(&self.states[terminal_index]);
         for (slot, cell) in self.slots.iter().zip(output[1..].iter_mut()) {
             *cell = if slot.state_index <= terminal_index {
-                render_instant(instants[slot.state_index], &slot.family)?
+                render_instant(instants[slot.state_index], &RenderZone::Utc, &slot.family)?
             } else {
                 GeneratedValue::Null
             };
@@ -1117,7 +1014,16 @@ fn compile_lifecycle(
     let path = context.path();
     let columns = config.args.get("columns");
 
-    let status_col = resolve_required(columns, "status", table, path, COLUMN_CODE, &mut bag);
+    let status_col = resolve_role(
+        columns,
+        "status",
+        table,
+        path,
+        TEMPORAL_LIFECYCLE_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
 
     let states = string_list(config.args.get("states"));
     if states.is_empty() {
@@ -1294,7 +1200,6 @@ fn compile_lifecycle(
 
     Ok(TemporalLifecyclePlanner {
         writes,
-        status_family: status.family.clone(),
         states,
         weights,
         slots: timestamp_slots,
@@ -1413,19 +1318,11 @@ pub static HIERARCHY_TREE_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
 /// Factory for the `hierarchy.tree` planner.
 pub struct HierarchyTreeFactory;
 
-impl PlannerFactory for HierarchyTreeFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &HIERARCHY_TREE_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_tree(config, context).map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    HierarchyTreeFactory,
+    HIERARCHY_TREE_DESCRIPTOR,
+    compile_tree
+);
 
 /// The compiled `hierarchy.tree` planner. Rows are generated in index order, so
 /// the planner accumulates the depth and remaining branching capacity of every
@@ -1469,14 +1366,6 @@ impl HierarchyTreePlanner {
     fn key_of(&self, row_index: usize) -> i128 {
         self.key_start + self.key_step * row_index as i128
     }
-
-    /// Render a parent key value in the representation the parent column expects.
-    fn render_key(&self, key: i128) -> GeneratedValue {
-        match self.parent_family {
-            SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => GeneratedValue::Integer(key),
-            _ => GeneratedValue::Text(key.to_string()),
-        }
-    }
 }
 
 impl CompiledPlanner for HierarchyTreePlanner {
@@ -1513,7 +1402,10 @@ impl CompiledPlanner for HierarchyTreePlanner {
                     self.eligible.swap_remove(slot);
                 }
             }
-            (self.render_key(self.key_of(parent_index)), depth)
+            (
+                render_integer(self.key_of(parent_index), &self.parent_family),
+                depth,
+            )
         };
 
         // A node can parent future children only while it stays under the depth
@@ -1559,7 +1451,16 @@ fn compile_tree(
     let path = context.path();
     let columns = config.args.get("columns");
 
-    let parent_col = resolve_required(columns, "parent", table, path, COLUMN_CODE, &mut bag);
+    let parent_col = resolve_role(
+        columns,
+        "parent",
+        table,
+        path,
+        HIERARCHY_TREE_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
 
     // A non-nullable self-FK cannot hold the null a root needs, so every row
     // would have to reference another row: a required non-null self cycle with no
@@ -1772,14 +1673,6 @@ impl DenseKey {
     }
 }
 
-/// Render an integer key value in the representation the FK column expects.
-fn render_key(key: i128, family: &SqlTypeFamily) -> GeneratedValue {
-    match family {
-        SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => GeneratedValue::Integer(key),
-        _ => GeneratedValue::Text(key.to_string()),
-    }
-}
-
 /// Resolve a relationship's injected fact into a [`DenseKey`], or report why it
 /// cannot serve as a valid integer key domain (unknown relationship, or a
 /// non-dense parent key such as a UUID).
@@ -1880,20 +1773,11 @@ pub static RELATION_JUNCTION_PAIR_DESCRIPTOR: PlannerDescriptor = PlannerDescrip
 /// Factory for the `relation.junction_pair` planner.
 pub struct RelationJunctionPairFactory;
 
-impl PlannerFactory for RelationJunctionPairFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &RELATION_JUNCTION_PAIR_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_junction_pair(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    RelationJunctionPairFactory,
+    RELATION_JUNCTION_PAIR_DESCRIPTOR,
+    compile_junction_pair
+);
 
 /// The compiled `relation.junction_pair` planner. It maps the junction row index
 /// `n` to a distinct index in `[0, left.count * right.count)` via the bijection
@@ -1932,8 +1816,8 @@ impl CompiledPlanner for RelationJunctionPairPlanner {
         let right_count = self.right.count as i128;
         let left_row = (idx.div_euclid(right_count)) as u64;
         let right_row = (idx.rem_euclid(right_count)) as u64;
-        output[0] = render_key(self.left.key_at(left_row), &self.left_family);
-        output[1] = render_key(self.right.key_at(right_row), &self.right_family);
+        output[0] = render_integer(self.left.key_at(left_row), &self.left_family);
+        output[1] = render_integer(self.right.key_at(right_row), &self.right_family);
         Ok(())
     }
 
@@ -1956,8 +1840,26 @@ fn compile_junction_pair(
     let columns = config.args.get("columns");
     let facts = config.args.get(RELATION_FACTS_KEY);
 
-    let left_col = resolve_required(columns, "left", table, path, COLUMN_CODE, &mut bag);
-    let right_col = resolve_required(columns, "right", table, path, COLUMN_CODE, &mut bag);
+    let left_col = resolve_role(
+        columns,
+        "left",
+        table,
+        path,
+        RELATION_JUNCTION_PAIR_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
+    let right_col = resolve_role(
+        columns,
+        "right",
+        table,
+        path,
+        RELATION_JUNCTION_PAIR_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
 
     let left_rel = config
         .args
@@ -2115,20 +2017,11 @@ pub static RELATION_POLYMORPHIC_PAIR_DESCRIPTOR: PlannerDescriptor = PlannerDesc
 /// Factory for the `relation.polymorphic_pair` planner.
 pub struct RelationPolymorphicPairFactory;
 
-impl PlannerFactory for RelationPolymorphicPairFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &RELATION_POLYMORPHIC_PAIR_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_polymorphic_pair(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    RelationPolymorphicPairFactory,
+    RELATION_POLYMORPHIC_PAIR_DESCRIPTOR,
+    compile_polymorphic_pair
+);
 
 /// One resolved polymorphic target: the discriminator string written into the
 /// type column and the key domain the id is drawn from.
@@ -2174,7 +2067,7 @@ impl CompiledPlanner for RelationPolymorphicPairPlanner {
         .min(target.key.count.saturating_sub(1));
 
         output[0] = GeneratedValue::Text(target.type_label.clone());
-        output[1] = render_key(target.key.key_at(row), &self.id_family);
+        output[1] = render_integer(target.key.key_at(row), &self.id_family);
         Ok(())
     }
 
@@ -2197,8 +2090,26 @@ fn compile_polymorphic_pair(
     let columns = config.args.get("columns");
     let facts = config.args.get(RELATION_FACTS_KEY);
 
-    let type_col = resolve_required(columns, "type", table, path, COLUMN_CODE, &mut bag);
-    let id_col = resolve_required(columns, "id", table, path, COLUMN_CODE, &mut bag);
+    let type_col = resolve_role(
+        columns,
+        "type",
+        table,
+        path,
+        RELATION_POLYMORPHIC_PAIR_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
+    let id_col = resolve_role(
+        columns,
+        "id",
+        table,
+        path,
+        RELATION_POLYMORPHIC_PAIR_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
 
     let target_items = match config.args.get("targets") {
         Some(Value::Sequence(items)) if !items.is_empty() => items.as_slice(),
@@ -2380,20 +2291,11 @@ pub static RELATION_TENANT_FAMILY_DESCRIPTOR: PlannerDescriptor = PlannerDescrip
 /// Factory for the `relation.tenant_family` planner.
 pub struct RelationTenantFamilyFactory;
 
-impl PlannerFactory for RelationTenantFamilyFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &RELATION_TENANT_FAMILY_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_tenant_family(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    RelationTenantFamilyFactory,
+    RELATION_TENANT_FAMILY_DESCRIPTOR,
+    compile_tenant_family
+);
 
 /// The compiled `relation.tenant_family` planner. The parent's `count` rows are
 /// partitioned into `num_tenants` contiguous, balanced tenant blocks by row
@@ -2455,7 +2357,7 @@ impl CompiledPlanner for RelationTenantFamilyPlanner {
             }
             _ => GeneratedValue::Text((self.tenant_start + tenant as i128).to_string()),
         };
-        output[1] = render_key(self.parent.key_at(parent_row), &self.parent_family);
+        output[1] = render_integer(self.parent.key_at(parent_row), &self.parent_family);
         Ok(())
     }
 
@@ -2478,8 +2380,26 @@ fn compile_tenant_family(
     let columns = config.args.get("columns");
     let facts = config.args.get(RELATION_FACTS_KEY);
 
-    let tenant_col = resolve_required(columns, "tenant", table, path, COLUMN_CODE, &mut bag);
-    let parent_col = resolve_required(columns, "parent", table, path, COLUMN_CODE, &mut bag);
+    let tenant_col = resolve_role(
+        columns,
+        "tenant",
+        table,
+        path,
+        RELATION_TENANT_FAMILY_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
+    let parent_col = resolve_role(
+        columns,
+        "parent",
+        table,
+        path,
+        RELATION_TENANT_FAMILY_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
 
     let rel = config
         .args
@@ -2628,20 +2548,11 @@ pub static GEO_COORDINATE_PAIR_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor
 /// Factory for the `geo.coordinate_pair` planner.
 pub struct GeoCoordinatePairFactory;
 
-impl PlannerFactory for GeoCoordinatePairFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &GEO_COORDINATE_PAIR_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_coordinate_pair(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    GeoCoordinatePairFactory,
+    GEO_COORDINATE_PAIR_DESCRIPTOR,
+    compile_coordinate_pair
+);
 
 struct GeoCoordinatePairPlanner {
     writes: Vec<String>,
@@ -2675,39 +2586,14 @@ impl CompiledPlanner for GeoCoordinatePairPlanner {
         let lon_minor = self
             .lon_rng
             .random_range(self.lon_min_minor..=self.lon_max_minor);
-        output[0] = render_decimal(&self.lat_family, lat_minor, self.scale);
-        output[1] = render_decimal(&self.lon_family, lon_minor, self.scale);
+        output[0] = decimal_value(&self.lat_family, lat_minor, self.scale);
+        output[1] = decimal_value(&self.lon_family, lon_minor, self.scale);
         Ok(())
     }
 
     fn verification_predicates(&self) -> Vec<PlannerPredicate> {
         Vec::new()
     }
-}
-
-/// Render a fixed-point value in whichever representation `family` expects
-/// (mirrors `semantic.rs`'s private `decimal_value`; kept local since that
-/// helper is module-private and duplicating it here is cheaper than exposing
-/// it across modules for one shared use).
-fn render_decimal(family: &SqlTypeFamily, minor: i128, scale: u32) -> GeneratedValue {
-    match family {
-        SqlTypeFamily::Decimal => GeneratedValue::Decimal { minor, scale },
-        _ => GeneratedValue::Text(format_fixed_point(minor, scale)),
-    }
-}
-
-/// Render `minor` units at `scale` decimal places as a fixed-point string.
-fn format_fixed_point(minor: i128, scale: u32) -> String {
-    if scale == 0 {
-        return minor.to_string();
-    }
-    let negative = minor < 0;
-    let magnitude = minor.unsigned_abs();
-    let factor = 10u128.pow(scale);
-    let whole = magnitude / factor;
-    let frac = magnitude % factor;
-    let sign = if negative { "-" } else { "" };
-    format!("{sign}{whole}.{frac:0width$}", width = scale as usize)
 }
 
 fn compile_coordinate_pair(
@@ -2722,8 +2608,26 @@ fn compile_coordinate_pair(
     let path = context.path();
     let columns = config.args.get("columns");
 
-    let lat_col = resolve_required(columns, "latitude", table, path, COLUMN_CODE, &mut bag);
-    let lon_col = resolve_required(columns, "longitude", table, path, COLUMN_CODE, &mut bag);
+    let lat_col = resolve_role(
+        columns,
+        "latitude",
+        table,
+        path,
+        GEO_COORDINATE_PAIR_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
+    let lon_col = resolve_role(
+        columns,
+        "longitude",
+        table,
+        path,
+        GEO_COORDINATE_PAIR_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
 
     let precision = config.args.get("precision").and_then(as_i128).unwrap_or(6);
     if !(0..=9).contains(&precision) {
@@ -3071,20 +2975,11 @@ pub static FILE_METADATA_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
 /// Factory for the `file.metadata` planner.
 pub struct FileMetadataFactory;
 
-impl PlannerFactory for FileMetadataFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &FILE_METADATA_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_file_metadata(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    FileMetadataFactory,
+    FILE_METADATA_DESCRIPTOR,
+    compile_file_metadata
+);
 
 struct FileMetadataPlanner {
     writes: Vec<String>,
@@ -3142,7 +3037,7 @@ impl CompiledPlanner for FileMetadataPlanner {
                 .saturating_sub(self.size_min)
                 .saturating_add(1);
             let offset = ((size_pick * span as f64) as i128).clamp(0, span - 1);
-            output[slot] = render_key(self.size_min.saturating_add(offset), family);
+            output[slot] = render_integer(self.size_min.saturating_add(offset), family);
             slot += 1;
         }
         if let Some(hash_len) = self.hash_len {
@@ -3179,11 +3074,56 @@ fn compile_file_metadata(
     let path = context.path();
     let columns = config.args.get("columns");
 
-    let name_col = resolve_required(columns, "name", table, path, COLUMN_CODE, &mut bag);
-    let extension_col = resolve_optional(columns, "extension", table, path, COLUMN_CODE, &mut bag);
-    let mime_col = resolve_optional(columns, "mime_type", table, path, COLUMN_CODE, &mut bag);
-    let size_col = resolve_optional(columns, "size", table, path, COLUMN_CODE, &mut bag);
-    let hash_col = resolve_optional(columns, "hash", table, path, COLUMN_CODE, &mut bag);
+    let name_col = resolve_role(
+        columns,
+        "name",
+        table,
+        path,
+        FILE_METADATA_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        true,
+        &mut bag,
+    );
+    let extension_col = resolve_role(
+        columns,
+        "extension",
+        table,
+        path,
+        FILE_METADATA_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        false,
+        &mut bag,
+    );
+    let mime_col = resolve_role(
+        columns,
+        "mime_type",
+        table,
+        path,
+        FILE_METADATA_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        false,
+        &mut bag,
+    );
+    let size_col = resolve_role(
+        columns,
+        "size",
+        table,
+        path,
+        FILE_METADATA_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        false,
+        &mut bag,
+    );
+    let hash_col = resolve_role(
+        columns,
+        "hash",
+        table,
+        path,
+        FILE_METADATA_DESCRIPTOR.kind,
+        COLUMN_CODE,
+        false,
+        &mut bag,
+    );
 
     let requested_extensions = string_list(config.args.get("extensions"));
     let mut entries: Vec<&'static FileTypeEntry> = Vec::new();
@@ -3325,30 +3265,4 @@ fn compile_file_metadata(
         hash_rng,
         predicates,
     })
-}
-
-/// Resolve an optional column role: `None` when the role is absent from
-/// `columns`, `Some` when present and valid, or a compile error when present
-/// but naming a column that does not exist on the table.
-fn resolve_optional<'a>(
-    columns: Option<&Value>,
-    role: &str,
-    table: &'a PortableTable,
-    path: &str,
-    code: &'static str,
-    bag: &mut DiagnosticBag,
-) -> Option<&'a PortableColumn> {
-    let name = role_name(columns, role)?;
-    let column = find_column(table, name);
-    if column.is_none() {
-        bag.error(
-            code,
-            format!("{path}.columns.{role}"),
-            format!(
-                "file.metadata `{role}` column `{name}` does not exist on table `{}`",
-                table.name
-            ),
-        );
-    }
-    column
 }

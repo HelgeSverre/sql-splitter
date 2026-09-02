@@ -1,6 +1,6 @@
 //! Borrowed, allocation-free SQL string-literal rendering.
 
-use std::fmt::{self, Display, Formatter, Write};
+use std::fmt::{self, Display, Formatter};
 
 use crate::parser::SqlDialect;
 
@@ -21,41 +21,71 @@ impl<'a> SqlString<'a> {
 
 impl Display for SqlString<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // In PostgreSQL a backslash is only a literal character under
-        // `standard_conforming_strings = on`; with it off, `\'` escapes the
-        // quote and a value ending in a backslash breaks out of the literal.
-        // Render any backslash-bearing value as an `E'...'` escape string with
-        // doubled backslashes so it is unambiguous regardless of that server
-        // setting. (SQLite/MSSQL never treat a backslash specially; MySQL's
-        // default mode already backslash-escapes.)
-        if self.dialect == SqlDialect::Postgres && self.value.contains('\\') {
-            f.write_str("E'")?;
-            for ch in self.value.chars() {
-                match ch {
-                    '\\' => f.write_str("\\\\")?,
-                    '\'' => f.write_str("''")?,
-                    ch => f.write_char(ch)?,
-                }
-            }
-            return f.write_str("'");
-        }
-        if self.dialect == SqlDialect::Mssql {
-            f.write_str("N")?;
-        }
-        f.write_str("'")?;
-        for ch in self.value.chars() {
-            match (self.dialect, ch) {
-                (SqlDialect::MySql, '\\') => f.write_str("\\\\")?,
-                (SqlDialect::MySql, '\'') => f.write_str("\\'")?,
-                (SqlDialect::MySql, '\n') => f.write_str("\\n")?,
-                (SqlDialect::MySql, '\r') => f.write_str("\\r")?,
-                (SqlDialect::MySql, '\t') => f.write_str("\\t")?,
-                (_, '\'') => f.write_str("''")?,
-                (_, ch) => f.write_char(ch)?,
-            }
-        }
-        f.write_str("'")
+        // Pieces are split only at ASCII bytes, so every piece is valid UTF-8.
+        escape_into(self.dialect, self.value.as_bytes(), |piece| {
+            f.write_str(std::str::from_utf8(piece).map_err(|_| fmt::Error)?)
+        })
     }
+}
+
+/// Append `value` to `out` as a `dialect`-correct quoted SQL string literal.
+///
+/// Byte-oriented twin of [`SqlString`]: only ASCII bytes are ever escaped, so
+/// arbitrary (even non-UTF-8) bytes pass through untouched.
+pub fn push_sql_literal(out: &mut Vec<u8>, dialect: SqlDialect, value: &[u8]) {
+    let Ok(()) = escape_into(dialect, value, |piece| {
+        out.extend_from_slice(piece);
+        Ok::<(), std::convert::Infallible>(())
+    });
+}
+
+/// Feed the pieces of the quoted, escaped literal for `value` to `emit`.
+///
+/// In PostgreSQL a backslash is only a literal character under
+/// `standard_conforming_strings = on`; with it off, `\'` escapes the quote and
+/// a value ending in a backslash breaks out of the literal. Any
+/// backslash-bearing value is therefore rendered as an `E'...'` escape string
+/// with doubled backslashes so it is unambiguous regardless of that setting.
+/// (SQLite/MSSQL never treat a backslash specially; MySQL's default mode
+/// already backslash-escapes.)
+fn escape_into<E>(
+    dialect: SqlDialect,
+    value: &[u8],
+    mut emit: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    let pg_escape = dialect == SqlDialect::Postgres && value.contains(&b'\\');
+    let escape = |b: u8| -> Option<&'static [u8]> {
+        match (dialect, b) {
+            (SqlDialect::MySql, b'\\') => Some(b"\\\\"),
+            (SqlDialect::MySql, b'\'') => Some(b"\\'"),
+            (SqlDialect::MySql, b'\n') => Some(b"\\n"),
+            (SqlDialect::MySql, b'\r') => Some(b"\\r"),
+            (SqlDialect::MySql, b'\t') => Some(b"\\t"),
+            (SqlDialect::Postgres, b'\\') if pg_escape => Some(b"\\\\"),
+            (_, b'\'') => Some(b"''"),
+            _ => None,
+        }
+    };
+
+    emit(match dialect {
+        SqlDialect::Postgres if pg_escape => b"E'",
+        SqlDialect::Mssql => b"N'",
+        _ => b"'",
+    })?;
+    let mut start = 0;
+    for (i, &b) in value.iter().enumerate() {
+        if let Some(esc) = escape(b) {
+            if start < i {
+                emit(&value[start..i])?;
+            }
+            emit(esc)?;
+            start = i + 1;
+        }
+    }
+    if start < value.len() {
+        emit(&value[start..])?;
+    }
+    emit(b"'")
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, OUTPUT_FORMAT};
+use super::common::{comma_list, BEHAVIOR, FILTERING, INPUT_OUTPUT, OUTPUT_FORMAT};
 use crate::parser::ContentFilter;
 use crate::splitter::{Compression, Splitter};
 use crate::writer::IoStrategy;
@@ -309,9 +309,7 @@ fn run_single(
         println!();
     }
 
-    let table_filter: Vec<String> = tables
-        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
+    let table_filter: Vec<String> = tables.as_deref().map(comma_list).unwrap_or_default();
 
     if !json && !table_filter.is_empty() {
         println!("Filtering to tables: {}\n", table_filter.join(", "));
@@ -549,10 +547,7 @@ fn run_multi(
                 ContentFilter::All
             };
 
-            let table_filter: Vec<String> = tables
-                .clone()
-                .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
-                .unwrap_or_default();
+            let table_filter: Vec<String> = tables.as_deref().map(comma_list).unwrap_or_default();
 
             let mut splitter = Splitter::new(file.to_path_buf(), output_dir.clone())
                 .with_dialect(resolved_dialect)
@@ -661,20 +656,7 @@ fn run_multi(
         };
         println!("{}", serde_json::to_string_pretty(&output_json)?);
     } else {
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("Split Summary:");
-        println!("  Total files: {}", run.total);
-        println!("  Succeeded: {}", run.succeeded);
-        println!("  Failed: {}", run.failed);
-        println!("  Time: {:.3?}", run.elapsed);
-
-        if has_failures {
-            println!();
-            println!("Failed files:");
-            for (path, error) in &run.errors {
-                println!("  - {}: {}", path.display(), error);
-            }
-        }
+        run.print_summary("Split Summary", "Succeeded", false);
     }
 
     // A batch with failures must exit non-zero (in both JSON and text mode)

@@ -12,7 +12,8 @@
 //! embed only aggregate parameters, never raw values.
 
 use super::{
-    generator_with, weighted_entries, yaml, Candidate, ColumnContext, Confidence, Precedence,
+    generator_with, round4, weighted_entries, yaml, Candidate, ColumnContext, Confidence,
+    Precedence,
 };
 use crate::profile::evidence::{ColumnEvidence, NumericEvidence};
 use crate::synthetic::schema::SqlTypeFamily;
@@ -259,8 +260,4 @@ fn sample_entries(evidence: &ColumnEvidence) -> Option<Vec<(String, u64)>> {
         .map(|v| (v.clone(), 1))
         .collect();
     Some(entries)
-}
-
-fn round4(value: f64) -> f64 {
-    (value * 10_000.0).round() / 10_000.0
 }

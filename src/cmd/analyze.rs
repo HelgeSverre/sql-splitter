@@ -366,20 +366,7 @@ fn run_multi(
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("Analysis Summary:");
-        println!("  Total files: {}", run.total);
-        println!("  Succeeded: {}", run.succeeded);
-        println!("  Failed: {}", run.failed);
-        println!("  Time: {:.3?}", run.elapsed);
-
-        if has_failures {
-            println!();
-            println!("Failed files:");
-            for (path, error) in &run.errors {
-                println!("  - {}: {}", path.display(), error);
-            }
-        }
+        run.print_summary("Analysis Summary", "Succeeded", false);
     }
 
     // A batch with failures exits non-zero in both JSON and text mode so

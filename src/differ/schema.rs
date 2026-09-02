@@ -312,31 +312,13 @@ fn compare_tables(
     let old_fks: Vec<FkInfo> = old_table.foreign_keys.iter().map(FkInfo::from).collect();
     let new_fks: Vec<FkInfo> = new_table.foreign_keys.iter().map(FkInfo::from).collect();
 
-    let fks_added: Vec<FkInfo> = new_fks
-        .iter()
-        .filter(|fk| !old_fks.contains(fk))
-        .cloned()
-        .collect();
-    let fks_removed: Vec<FkInfo> = old_fks
-        .iter()
-        .filter(|fk| !new_fks.contains(fk))
-        .cloned()
-        .collect();
+    let (fks_added, fks_removed) = added_removed(&old_fks, &new_fks);
 
     // Compare indexes
     let old_indexes: Vec<IndexInfo> = old_table.indexes.iter().map(IndexInfo::from).collect();
     let new_indexes: Vec<IndexInfo> = new_table.indexes.iter().map(IndexInfo::from).collect();
 
-    let indexes_added: Vec<IndexInfo> = new_indexes
-        .iter()
-        .filter(|idx| !old_indexes.contains(idx))
-        .cloned()
-        .collect();
-    let indexes_removed: Vec<IndexInfo> = old_indexes
-        .iter()
-        .filter(|idx| !new_indexes.contains(idx))
-        .cloned()
-        .collect();
+    let (indexes_added, indexes_removed) = added_removed(&old_indexes, &new_indexes);
 
     TableModification {
         table_name: old_table.name.clone(),
@@ -385,4 +367,11 @@ fn compare_columns(old_col: &Column, new_col: &Column) -> Option<ColumnChange> {
             None
         },
     })
+}
+
+/// `(in new but not old, in old but not new)` by value equality.
+fn added_removed<T: Clone + PartialEq>(old: &[T], new: &[T]) -> (Vec<T>, Vec<T>) {
+    let added = new.iter().filter(|x| !old.contains(x)).cloned().collect();
+    let removed = old.iter().filter(|x| !new.contains(x)).cloned().collect();
+    (added, removed)
 }

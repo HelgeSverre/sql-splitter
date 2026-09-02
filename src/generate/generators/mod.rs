@@ -16,15 +16,81 @@ pub(crate) mod semantic;
 
 pub(crate) use core::register_all;
 
+use rand_chacha::ChaCha8Rng;
+
 use crate::diagnostic::DiagnosticBag;
 use crate::synthetic::model::GeneratorConfig;
-use crate::synthetic::schema::SqlTypeFamily;
+use crate::synthetic::schema::{PortableColumn, PortableTable, SqlTypeFamily};
 
 use super::registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, Determinism,
     GeneratorDescriptor, GeneratorFactory, RowContext, Verification,
 };
+use super::seed::StreamId;
 use super::value::{GenerateError, GeneratedValue};
+
+// --- Shared helpers ----------------------------------------------------------
+
+/// The target column of a column-scoped operator. Every generator/modifier
+/// in this catalog is column-scoped, so the compiler always builds its
+/// `CompileContext` with [`CompileContext::for_column`]; a missing column would
+/// be a caller bug, not a data problem, hence the `expect`.
+pub(super) fn column<'a>(context: &CompileContext<'a>) -> &'a PortableColumn {
+    context
+        .column()
+        .expect("catalog generators and modifiers are column-scoped")
+}
+
+/// The deterministic RNG stream for a column-scoped operator, keyed by
+/// table, column, and the operator's own kind so two different generators on
+/// the same column never share a stream.
+pub(super) fn stream(context: &CompileContext<'_>, kind: &str) -> ChaCha8Rng {
+    let table = context.table().name.clone();
+    let col = column(context).name.clone();
+    context.rng(StreamId::column(table, col, kind.to_string()))
+}
+
+pub(super) fn find_column<'a>(table: &'a PortableTable, name: &str) -> Option<&'a PortableColumn> {
+    table.columns.iter().find(|c| c.name == name)
+}
+
+/// Minimal YAML -> string rendering for scalar config values (used for
+/// literal template fragments and `display`-style coercion).
+pub(super) fn display_yaml(value: &serde_yaml_ng::Value) -> String {
+    match value {
+        serde_yaml_ng::Value::Null => String::new(),
+        serde_yaml_ng::Value::Bool(b) => b.to_string(),
+        serde_yaml_ng::Value::Number(n) => n.to_string(),
+        serde_yaml_ng::Value::String(s) => s.clone(),
+        other => serde_yaml_ng::to_string(other)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string(),
+    }
+}
+
+pub(super) fn parse_i128(value: &serde_yaml_ng::Value) -> Option<i128> {
+    match value {
+        serde_yaml_ng::Value::Number(n) => n
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| n.as_f64().map(|f| f as i128)),
+        serde_yaml_ng::Value::String(s) => s.trim().parse::<i128>().ok(),
+        _ => None,
+    }
+}
+
+pub(super) fn parse_f64(value: &serde_yaml_ng::Value) -> Option<f64> {
+    match value {
+        serde_yaml_ng::Value::Number(n) => n.as_f64(),
+        serde_yaml_ng::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+pub(super) fn parse_usize(value: &serde_yaml_ng::Value) -> Option<usize> {
+    parse_i128(value).and_then(|n| usize::try_from(n).ok())
+}
 
 /// The `constant` generator: emits the same configured value for every row.
 ///

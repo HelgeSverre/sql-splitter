@@ -4,7 +4,9 @@
 //! the redacted values back to SQL with proper dialect-aware escaping.
 
 use crate::parser::mysql_insert::{InsertParser, ParsedValue, RowExtraction};
-use crate::parser::postgres_copy::{decode_copy_escapes, parse_copy_columns, CopyParser};
+use crate::parser::postgres_copy::{
+    copy_escape, decode_copy_escapes, parse_copy_columns, CopyParser,
+};
 use crate::parser::SqlDialect;
 use crate::redactor::strategy::{
     ConstantStrategy, FakeStrategy, HashStrategy, MaskStrategy, NullStrategy, RedactValue,
@@ -281,17 +283,12 @@ impl ValueRewriter {
     /// Encode string for COPY format (escape special characters)
     fn encode_copy_escapes(&self, value: &str) -> Vec<u8> {
         let mut result = Vec::with_capacity(value.len());
-
         for b in value.bytes() {
-            match b {
-                b'\n' => result.extend_from_slice(b"\\n"),
-                b'\r' => result.extend_from_slice(b"\\r"),
-                b'\t' => result.extend_from_slice(b"\\t"),
-                b'\\' => result.extend_from_slice(b"\\\\"),
-                _ => result.push(b),
+            match copy_escape(b) {
+                Some(esc) => result.extend_from_slice(esc.as_bytes()),
+                None => result.push(b),
             }
         }
-
         result
     }
 
@@ -492,61 +489,8 @@ enum CopyValueRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Column, ColumnId, ColumnType, TableId, TableSchema};
 
-    fn create_test_schema() -> TableSchema {
-        TableSchema {
-            name: "users".to_string(),
-            id: TableId(0),
-            columns: vec![
-                Column {
-                    name: "id".to_string(),
-                    col_type: ColumnType::Int,
-                    source_type: "INT".to_string(),
-                    ordinal: ColumnId(0),
-                    is_primary_key: true,
-                    is_nullable: false,
-                    is_unique: false,
-                    default_sql: None,
-                    is_generated: false,
-                    is_identity: false,
-                    collation: None,
-                },
-                Column {
-                    name: "email".to_string(),
-                    col_type: ColumnType::Text,
-                    source_type: "VARCHAR(255)".to_string(),
-                    ordinal: ColumnId(1),
-                    is_primary_key: false,
-                    is_nullable: false,
-                    is_unique: false,
-                    default_sql: None,
-                    is_generated: false,
-                    is_identity: false,
-                    collation: None,
-                },
-                Column {
-                    name: "name".to_string(),
-                    col_type: ColumnType::Text,
-                    source_type: "VARCHAR(255)".to_string(),
-                    ordinal: ColumnId(2),
-                    is_primary_key: false,
-                    is_nullable: true,
-                    is_unique: false,
-                    default_sql: None,
-                    is_generated: false,
-                    is_identity: false,
-                    collation: None,
-                },
-            ],
-            primary_key: vec![ColumnId(0)],
-            foreign_keys: vec![],
-            unique_constraints: vec![],
-            check_constraints: vec![],
-            indexes: vec![],
-            create_statement: None,
-        }
-    }
+    use crate::redactor::test_fixtures::create_test_schema;
 
     #[test]
     fn test_rewrite_insert_table_name_with_values() {

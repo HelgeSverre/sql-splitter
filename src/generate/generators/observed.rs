@@ -22,47 +22,17 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::diagnostic::DiagnosticBag;
 use crate::synthetic::model::GeneratorConfig;
-use crate::synthetic::schema::{PortableColumn, SqlTypeFamily};
+use crate::synthetic::schema::SqlTypeFamily;
 
 use crate::generate::registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, Determinism,
     ExtensionRegistry, GeneratorDescriptor, GeneratorFactory, RowContext, Verification,
 };
-use crate::generate::seed::StreamId;
 use crate::generate::value::{GenerateError, GeneratedValue};
 
+use super::{column, display_yaml, parse_f64, parse_i128, stream};
+
 // --- Shared helpers ----------------------------------------------------------
-
-fn column<'a>(context: &CompileContext<'a>) -> &'a PortableColumn {
-    context
-        .column()
-        .expect("observed generators are column-scoped")
-}
-
-fn stream(context: &CompileContext<'_>, kind: &str) -> ChaCha8Rng {
-    let table = context.table().name.clone();
-    let col = column(context).name.clone();
-    context.rng(StreamId::column(table, col, kind.to_string()))
-}
-
-fn parse_f64(value: &serde_yaml_ng::Value) -> Option<f64> {
-    match value {
-        serde_yaml_ng::Value::Number(n) => n.as_f64(),
-        serde_yaml_ng::Value::String(s) => s.trim().parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
-fn parse_i128(value: &serde_yaml_ng::Value) -> Option<i128> {
-    match value {
-        serde_yaml_ng::Value::Number(n) => n
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| n.as_f64().map(|f| f as i128)),
-        serde_yaml_ng::Value::String(s) => s.trim().parse::<i128>().ok(),
-        _ => None,
-    }
-}
 
 fn parse_u32(value: &serde_yaml_ng::Value) -> Option<u32> {
     parse_i128(value).and_then(|n| u32::try_from(n).ok())
@@ -87,21 +57,6 @@ fn decimal_scale(
         return 0;
     }
     scale
-}
-
-/// Render a scalar YAML value as the text an `observed_sample` replays for a
-/// text-family column.
-fn display_yaml(value: &serde_yaml_ng::Value) -> String {
-    match value {
-        serde_yaml_ng::Value::Null => String::new(),
-        serde_yaml_ng::Value::Bool(b) => b.to_string(),
-        serde_yaml_ng::Value::Number(n) => n.to_string(),
-        serde_yaml_ng::Value::String(s) => s.clone(),
-        other => serde_yaml_ng::to_string(other)
-            .unwrap_or_default()
-            .trim_end()
-            .to_string(),
-    }
 }
 
 /// Coerce a literal `observed_sample` value into a [`GeneratedValue`] for
@@ -462,7 +417,7 @@ impl CompiledGenerator for CompiledHistogram {
 // --- normal / lognormal ------------------------------------------------------
 
 /// Standard-normal draw via Box–Muller, using two uniform draws.
-fn standard_normal(rng: &mut ChaCha8Rng) -> f64 {
+pub(crate) fn standard_normal(rng: &mut ChaCha8Rng) -> f64 {
     let u1 = rng.random::<f64>().max(f64::MIN_POSITIVE);
     let u2 = rng.random::<f64>();
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()

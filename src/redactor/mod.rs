@@ -23,7 +23,7 @@ pub use strategy::StrategyKind;
 
 use crate::parser::postgres_copy::parse_copy_columns;
 use crate::parser::{Parser, SqlDialect, StatementType};
-use crate::schema::Schema;
+use crate::schema::{Schema, TableSchema};
 use ahash::AHashMap;
 use schemars::JsonSchema;
 use std::fs::File;
@@ -243,46 +243,33 @@ impl Redactor {
 
     /// Redact an INSERT statement
     fn redact_insert(&mut self, stmt: &[u8], table_name: &str) -> anyhow::Result<Vec<u8>> {
-        // Skip if table should be excluded
-        if self.should_skip_table(table_name) {
-            return Ok(stmt.to_vec());
-        }
-
-        // Get table schema
-        let Some(table) = self.schema.get_table(table_name) else {
-            self.stats.warnings.push(format!(
-                "No schema for table '{}', passing through unchanged",
-                table_name
-            ));
-            return Ok(stmt.to_vec());
-        };
-
-        // Get strategies for each column
-        let strategies = self.matcher.get_strategies(table_name, table);
-
-        // If no columns need redaction, pass through
-        if strategies.iter().all(|s| matches!(s, StrategyKind::Skip)) {
-            return Ok(stmt.to_vec());
-        }
-
-        // Rewrite the INSERT statement with redacted values
-        let (redacted, rows_redacted, cols_redacted) =
-            self.rewriter
-                .rewrite_insert(stmt, table_name, table, &strategies)?;
-
-        self.record_stats(table_name, rows_redacted, cols_redacted);
-
-        Ok(redacted)
+        self.redact_rows(stmt, table_name, ValueRewriter::rewrite_insert)
     }
 
     /// Redact a COPY statement (PostgreSQL)
     fn redact_copy(&mut self, stmt: &[u8], table_name: &str) -> anyhow::Result<Vec<u8>> {
-        // Skip if table should be excluded
+        self.redact_rows(stmt, table_name, ValueRewriter::rewrite_copy)
+    }
+
+    /// Shared INSERT/COPY path: skip excluded or schema-less tables, pass
+    /// through when no column needs redaction, else run `rewrite` and record
+    /// its `(output, rows_redacted, cols_redacted)` in the stats.
+    fn redact_rows(
+        &mut self,
+        stmt: &[u8],
+        table_name: &str,
+        rewrite: impl FnOnce(
+            &mut ValueRewriter,
+            &[u8],
+            &str,
+            &TableSchema,
+            &[StrategyKind],
+        ) -> anyhow::Result<(Vec<u8>, u64, u64)>,
+    ) -> anyhow::Result<Vec<u8>> {
         if self.should_skip_table(table_name) {
             return Ok(stmt.to_vec());
         }
 
-        // Get table schema
         let Some(table) = self.schema.get_table(table_name) else {
             self.stats.warnings.push(format!(
                 "No schema for table '{}', passing through unchanged",
@@ -291,18 +278,13 @@ impl Redactor {
             return Ok(stmt.to_vec());
         };
 
-        // Get strategies for each column
         let strategies = self.matcher.get_strategies(table_name, table);
-
-        // If no columns need redaction, pass through
         if strategies.iter().all(|s| matches!(s, StrategyKind::Skip)) {
             return Ok(stmt.to_vec());
         }
 
-        // Rewrite the COPY statement with redacted values
         let (redacted, rows_redacted, cols_redacted) =
-            self.rewriter
-                .rewrite_copy(stmt, table_name, table, &strategies)?;
+            rewrite(&mut self.rewriter, stmt, table_name, table, &strategies)?;
 
         self.record_stats(table_name, rows_redacted, cols_redacted);
 
@@ -384,5 +366,52 @@ impl Redactor {
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_fixtures {
+    use crate::schema::{Column, ColumnId, ColumnType, TableId, TableSchema};
+
+    pub(crate) fn column(
+        name: &str,
+        col_type: ColumnType,
+        source_type: &str,
+        ordinal: u16,
+        pk: bool,
+        nullable: bool,
+    ) -> Column {
+        Column {
+            name: name.to_string(),
+            col_type,
+            source_type: source_type.to_string(),
+            ordinal: ColumnId(ordinal),
+            is_primary_key: pk,
+            is_nullable: nullable,
+            is_unique: false,
+            default_sql: None,
+            is_generated: false,
+            is_identity: false,
+            collation: None,
+        }
+    }
+
+    /// `users(id INT PK, email VARCHAR(255) NOT NULL, name VARCHAR(255) NULL)`.
+    pub(crate) fn create_test_schema() -> TableSchema {
+        TableSchema {
+            name: "users".to_string(),
+            id: TableId(0),
+            columns: vec![
+                column("id", ColumnType::Int, "INT", 0, true, false),
+                column("email", ColumnType::Text, "VARCHAR(255)", 1, false, false),
+                column("name", ColumnType::Text, "VARCHAR(255)", 2, false, true),
+            ],
+            primary_key: vec![ColumnId(0)],
+            foreign_keys: vec![],
+            unique_constraints: vec![],
+            check_constraints: vec![],
+            indexes: vec![],
+            create_statement: None,
+        }
     }
 }

@@ -36,12 +36,17 @@ use serde_yaml_ng::Value;
 use crate::diagnostic::DiagnosticBag;
 use crate::generate::registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism,
-    PlannerDescriptor, PlannerFactory, PlannerPredicate, PredicateGuard, Verification,
+    PlannerDescriptor, PlannerPredicate, PredicateGuard, Verification,
 };
 use crate::generate::seed::StreamId;
 use crate::generate::value::{GenerateError, GeneratedValue};
 use crate::synthetic::model::PlannerConfig;
-use crate::synthetic::schema::{PortableColumn, PortableTable, SqlTypeFamily};
+use crate::synthetic::schema::{PortableTable, SqlTypeFamily};
+
+use super::{
+    as_f64, as_i128, column_nullable, find_column, planner_factory, render_integer, render_status,
+    role_name, string_list,
+};
 
 /// The default completion base instant (`2024-01-01T00:00:00Z`) in epoch
 /// seconds, and the default window width completion timestamps spread across.
@@ -106,20 +111,11 @@ pub static WORKFLOW_PROGRESS_COUNTERS_DESCRIPTOR: PlannerDescriptor = PlannerDes
 /// Factory for the `workflow.progress_counters` planner.
 pub struct ProgressCountersFactory;
 
-impl PlannerFactory for ProgressCountersFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &WORKFLOW_PROGRESS_COUNTERS_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_progress(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    ProgressCountersFactory,
+    WORKFLOW_PROGRESS_COUNTERS_DESCRIPTOR,
+    compile_progress
+);
 
 // --- Lifecycle model --------------------------------------------------------
 
@@ -306,7 +302,7 @@ impl CompiledPlanner for ProgressCountersPlanner {
                 Role::Succeeded => render_counter(counts.succeeded, &slot.family),
                 Role::Failed => render_counter(counts.failed, &slot.family),
                 Role::Pending => render_counter(counts.pending, &slot.family),
-                Role::Status => render_status(&counts.status, &slot.family),
+                Role::Status => render_status(&counts.status),
                 Role::CompletedAt => match &counts.completed_at {
                     Some(text) => render_datetime(text, &slot.family),
                     None => GeneratedValue::Null,
@@ -464,22 +460,11 @@ fn completion_instant(offset: f64) -> String {
 /// Render a counter in the representation `family` expects.
 fn render_counter(value: i128, family: &SqlTypeFamily) -> GeneratedValue {
     match family {
-        SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => GeneratedValue::Integer(value),
         SqlTypeFamily::Decimal => GeneratedValue::Decimal {
             minor: value,
             scale: 0,
         },
-        _ => GeneratedValue::Text(value.to_string()),
-    }
-}
-
-/// Render a status label in the representation `family` expects.
-fn render_status(status: &str, family: &SqlTypeFamily) -> GeneratedValue {
-    match family {
-        SqlTypeFamily::Text | SqlTypeFamily::Uuid | SqlTypeFamily::Other => {
-            GeneratedValue::Text(status.to_string())
-        }
-        _ => GeneratedValue::Text(status.to_string()),
+        _ => render_integer(value, family),
     }
 }
 
@@ -966,50 +951,5 @@ fn family_capacity(family: &SqlTypeFamily) -> i128 {
         SqlTypeFamily::Integer => i32::MAX as i128,
         SqlTypeFamily::BigInteger => i64::MAX as i128,
         _ => i128::MAX,
-    }
-}
-
-/// The column name a `columns:` mapping assigns to `role`, if any.
-fn role_name<'a>(columns: Option<&'a Value>, role: &str) -> Option<&'a str> {
-    columns?.get(role).and_then(Value::as_str)
-}
-
-fn find_column<'a>(table: &'a PortableTable, name: &str) -> Option<&'a PortableColumn> {
-    table.columns.iter().find(|column| column.name == name)
-}
-
-fn column_nullable(table: &PortableTable, name: &str) -> bool {
-    find_column(table, name).is_some_and(|column| column.nullable)
-}
-
-/// Parse a YAML value into a list of strings (from a sequence of scalars).
-fn string_list(value: Option<&Value>) -> Vec<String> {
-    match value {
-        Some(Value::Sequence(items)) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn as_i128(value: &Value) -> Option<i128> {
-    match value {
-        Value::Number(number) => number
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| number.as_u64().map(i128::from))
-            .or_else(|| number.as_f64().map(|float| float as i128)),
-        Value::String(text) => text.trim().parse::<i128>().ok(),
-        _ => None,
-    }
-}
-
-fn as_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().parse::<f64>().ok(),
-        _ => None,
     }
 }

@@ -23,76 +23,21 @@ use chrono::{Duration as ChronoDuration, NaiveDate, NaiveDateTime};
 use crate::diagnostic::DiagnosticBag;
 use crate::fake_data::{self, Locale};
 use crate::synthetic::model::GeneratorConfig;
-use crate::synthetic::schema::{PortableColumn, PortableTable, SqlTypeFamily};
+use crate::synthetic::schema::SqlTypeFamily;
 
 use crate::generate::registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledGenerator, Determinism,
     ExtensionRegistry, GeneratorDescriptor, GeneratorFactory, RowContext, Verification,
     INHERENT_UNIQUENESS_ENTROPY_BITS,
 };
-use crate::generate::seed::StreamId;
-use crate::generate::value::{GenerateError, GeneratedValue};
+use crate::generate::value::{decimal_value, format_decimal, GenerateError, GeneratedValue};
 
-// --- Shared helpers (mirrors core.rs's; kept local since core.rs's are
-// module-private and this catalog's argument surface is small enough that
-// duplicating a handful of parsers is cheaper than widening core.rs's API)
-// ---------------------------------------------------------------------------
+use super::{column, find_column, parse_i128, parse_usize, stream};
 
-fn column<'a>(context: &CompileContext<'a>) -> &'a PortableColumn {
-    context
-        .column()
-        .expect("semantic generators are column-scoped")
-}
-
-fn stream(context: &CompileContext<'_>, kind: &str) -> ChaCha8Rng {
-    let table = context.table().name.clone();
-    let col = column(context).name.clone();
-    context.rng(StreamId::column(table, col, kind.to_string()))
-}
-
-fn find_column<'a>(table: &'a PortableTable, name: &str) -> Option<&'a PortableColumn> {
-    table.columns.iter().find(|c| c.name == name)
-}
-
-fn parse_i128(value: &serde_yaml_ng::Value) -> Option<i128> {
-    match value {
-        serde_yaml_ng::Value::Number(n) => n
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| n.as_f64().map(|f| f as i128)),
-        serde_yaml_ng::Value::String(s) => s.trim().parse::<i128>().ok(),
-        _ => None,
-    }
-}
-
-fn parse_usize(value: &serde_yaml_ng::Value) -> Option<usize> {
-    parse_i128(value).and_then(|n| usize::try_from(n).ok())
-}
+// --- Local helpers ----------------------------------------------------------
 
 fn parse_str(value: &serde_yaml_ng::Value) -> Option<&str> {
     value.as_str()
-}
-
-/// Render `minor` units at `scale` decimal places as a fixed-point string.
-fn format_decimal(minor: i128, scale: u32) -> String {
-    if scale == 0 {
-        return minor.to_string();
-    }
-    let negative = minor < 0;
-    let magnitude = minor.unsigned_abs();
-    let factor = 10u128.pow(scale);
-    let whole = magnitude / factor;
-    let frac = magnitude % factor;
-    let sign = if negative { "-" } else { "" };
-    format!("{sign}{whole}.{frac:0width$}", width = scale as usize)
-}
-
-/// Emit a decimal-shaped value in whichever representation `family` expects.
-fn decimal_value(family: &SqlTypeFamily, minor: i128, scale: u32) -> GeneratedValue {
-    match family {
-        SqlTypeFamily::Decimal => GeneratedValue::Decimal { minor, scale },
-        _ => GeneratedValue::Text(format_decimal(minor, scale)),
-    }
 }
 
 /// Emit a timestamp-shaped value in whichever representation `family` expects.

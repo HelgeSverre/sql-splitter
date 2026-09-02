@@ -121,6 +121,8 @@ fn is_valid_generator(name: &str) -> bool {
             | "phone_number"
             | "address"
             | "street_address"
+            | "street"
+            | "street_name"
             | "city"
             | "state"
             | "zip"

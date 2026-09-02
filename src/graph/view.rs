@@ -159,34 +159,29 @@ impl GraphView {
 
     /// Filter to include only tables matching the given patterns
     pub fn filter_tables(&mut self, patterns: &[Pattern]) {
-        if patterns.is_empty() {
-            return;
-        }
-
-        let matching: AHashSet<String> = self
-            .tables
-            .keys()
-            .filter(|name| patterns.iter().any(|p| p.matches(name)))
-            .cloned()
-            .collect();
-
-        self.apply_node_filter(&matching);
+        self.retain_matching(patterns, true);
     }
 
     /// Exclude tables matching the given patterns
     pub fn exclude_tables(&mut self, patterns: &[Pattern]) {
+        self.retain_matching(patterns, false);
+    }
+
+    /// Keep the tables whose pattern-match status equals `keep`. No patterns
+    /// means no filtering.
+    fn retain_matching(&mut self, patterns: &[Pattern], keep: bool) {
         if patterns.is_empty() {
             return;
         }
 
-        let remaining: AHashSet<String> = self
+        let retained: AHashSet<String> = self
             .tables
             .keys()
-            .filter(|name| !patterns.iter().any(|p| p.matches(name)))
+            .filter(|name| patterns.iter().any(|p| p.matches(name)) == keep)
             .cloned()
             .collect();
 
-        self.apply_node_filter(&remaining);
+        self.apply_node_filter(&retained);
     }
 
     /// Focus on a specific table and its relationships
@@ -342,73 +337,7 @@ fn format_column_type(col_type: &ColumnType) -> String {
 mod tests {
     use super::*;
 
-    fn create_test_view() -> GraphView {
-        let mut tables = AHashMap::new();
-
-        tables.insert(
-            "users".to_string(),
-            TableInfo {
-                name: "users".to_string(),
-                columns: vec![
-                    ColumnInfo {
-                        name: "id".to_string(),
-                        col_type: "INT".to_string(),
-                        is_primary_key: true,
-                        is_foreign_key: false,
-                        is_nullable: false,
-                        references_table: None,
-                        references_column: None,
-                    },
-                    ColumnInfo {
-                        name: "email".to_string(),
-                        col_type: "VARCHAR".to_string(),
-                        is_primary_key: false,
-                        is_foreign_key: false,
-                        is_nullable: false,
-                        references_table: None,
-                        references_column: None,
-                    },
-                ],
-            },
-        );
-
-        tables.insert(
-            "orders".to_string(),
-            TableInfo {
-                name: "orders".to_string(),
-                columns: vec![
-                    ColumnInfo {
-                        name: "id".to_string(),
-                        col_type: "INT".to_string(),
-                        is_primary_key: true,
-                        is_foreign_key: false,
-                        is_nullable: false,
-                        references_table: None,
-                        references_column: None,
-                    },
-                    ColumnInfo {
-                        name: "user_id".to_string(),
-                        col_type: "INT".to_string(),
-                        is_primary_key: false,
-                        is_foreign_key: true,
-                        is_nullable: false,
-                        references_table: Some("users".to_string()),
-                        references_column: Some("id".to_string()),
-                    },
-                ],
-            },
-        );
-
-        let edges = vec![EdgeInfo {
-            from_table: "orders".to_string(),
-            from_column: "user_id".to_string(),
-            to_table: "users".to_string(),
-            to_column: "id".to_string(),
-            cardinality: Cardinality::ManyToOne,
-        }];
-
-        GraphView { tables, edges }
-    }
+    use crate::graph::test_fixtures::create_test_view;
 
     #[test]
     fn test_table_info() {

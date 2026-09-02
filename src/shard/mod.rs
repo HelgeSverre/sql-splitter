@@ -15,16 +15,15 @@ pub use config::{
 };
 
 use crate::parser::mysql_insert::{PkSet, PkValue, RowExtraction};
-use crate::parser::{Parser, SqlDialect};
+use crate::parser::SqlDialect;
 use crate::schema::{SchemaGraph, TableId, TableSchema};
 use crate::transform_common::{
-    build_schema_graph, for_each_data_row, quote_ident, split_to_temp_tables, write_dialect_footer,
-    write_dialect_header, write_insert_chunk, RowFlow, RowFormat, RowSpillReader, RowSpillWriter,
-    UnifiedRow,
+    build_schema_graph, for_each_data_row, split_to_temp_tables, write_header_totals,
+    write_transform_output, OutputTable, RowFlow, RowFormat, RowSpillWriter, UnifiedRow,
 };
 use ahash::{AHashMap, AHashSet};
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Configuration for the shard command
@@ -744,7 +743,7 @@ fn should_include_row(
     }
 }
 
-/// Write the sharded output
+/// Write the output file
 fn write_output(
     config: &ShardConfig,
     _graph: &SchemaGraph,
@@ -753,96 +752,29 @@ fn write_output(
     tables_dir: &Path,
     stats: &ShardStats,
 ) -> anyhow::Result<()> {
-    let mut writer: Box<dyn Write> = match &config.output {
-        Some(path) => {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            Box::new(BufWriter::with_capacity(256 * 1024, File::create(path)?))
-        }
-        None => Box::new(BufWriter::new(std::io::stdout())),
-    };
+    let tables: Vec<OutputTable<'_>> = table_order
+        .iter()
+        .filter_map(|id| runtimes.get(id))
+        .filter(|r| !r.skip && r.rows_selected > 0)
+        .map(|r| OutputTable {
+            name: &r.name,
+            rows_selected: r.rows_selected,
+            spill_path: r.selected_temp_path.as_deref(),
+        })
+        .collect();
 
-    // Write header comment
-    write_header(&mut writer, config, stats)?;
-
-    // Write dialect-specific header
-    write_dialect_header(&mut writer, config.dialect)?;
-
-    // Write schema for each table (if enabled)
-    if config.include_schema {
-        for &table_id in table_order {
-            let runtime = match runtimes.get(&table_id) {
-                Some(r) if !r.skip && r.rows_selected > 0 => r,
-                _ => continue,
-            };
-
-            let table_file = tables_dir.join(format!("{}.sql", runtime.name));
-            if !table_file.exists() {
-                continue;
-            }
-
-            let file = File::open(&table_file)?;
-            let mut parser = Parser::with_dialect(file, 64 * 1024, config.dialect);
-
-            while let Some(stmt) = parser.read_statement()? {
-                let (stmt_type, _) =
-                    Parser::<&[u8]>::parse_statement_with_dialect(&stmt, config.dialect);
-
-                if stmt_type.is_schema() {
-                    writer.write_all(&stmt)?;
-                    writer.write_all(b"\n")?;
-                }
-            }
-        }
-    }
-
-    // Write data for each table (reading from temp files instead of memory)
-    for &table_id in table_order {
-        let runtime = match runtimes.get(&table_id) {
-            Some(r) if !r.skip && r.rows_selected > 0 && r.selected_temp_path.is_some() => r,
-            _ => continue,
-        };
-
-        let table_name = &runtime.name;
-        let row_count = runtime.rows_selected;
-
-        writeln!(writer, "\n-- Data: {} ({} rows)", table_name, row_count)?;
-
-        let quoted_name = quote_ident(config.dialect, table_name);
-
-        // Read rows from temp file and write INSERTs in chunks
-        let temp_path = runtime.selected_temp_path.as_ref().unwrap();
-        let mut spill_reader = RowSpillReader::open(temp_path)?;
-
-        const CHUNK_SIZE: usize = 1000;
-        let mut chunk_buffer: Vec<(RowFormat, Vec<u8>)> = Vec::with_capacity(CHUNK_SIZE);
-
-        while let Some((format, row_bytes)) = spill_reader.next_row()? {
-            chunk_buffer.push((format, row_bytes));
-
-            if chunk_buffer.len() >= CHUNK_SIZE {
-                write_insert_chunk(&mut writer, &quoted_name, &chunk_buffer, config.dialect)?;
-                chunk_buffer.clear();
-            }
-        }
-
-        // Write remaining rows
-        if !chunk_buffer.is_empty() {
-            write_insert_chunk(&mut writer, &quoted_name, &chunk_buffer, config.dialect)?;
-        }
-    }
-
-    // Write dialect-specific footer
-    write_dialect_footer(&mut writer, config.dialect)?;
-
-    writer.flush()?;
-
-    Ok(())
+    write_transform_output(
+        config.output.as_deref(),
+        config.dialect,
+        config.include_schema,
+        &tables,
+        tables_dir,
+        |w| write_header(w, config, stats),
+    )
 }
 
 /// Write header comment
-fn write_header<W: Write>(
+fn write_header<W: Write + ?Sized>(
     writer: &mut W,
     config: &ShardConfig,
     stats: &ShardStats,
@@ -864,30 +796,12 @@ fn write_header<W: Write>(
     writeln!(writer, "--   Tables with data: {}", stats.tables_with_data)?;
     writeln!(writer, "--   Tables skipped: {}", stats.tables_skipped)?;
 
-    let percent = if stats.total_rows_seen > 0 {
-        (stats.total_rows_selected as f64 / stats.total_rows_seen as f64) * 100.0
-    } else {
-        0.0
-    };
-    writeln!(
+    write_header_totals(
         writer,
-        "--   Total rows: {} (from {} original, {:.1}%)",
-        stats.total_rows_selected, stats.total_rows_seen, percent
-    )?;
-
-    if stats.fk_orphans_skipped > 0 {
-        writeln!(
-            writer,
-            "--   FK orphans skipped: {}",
-            stats.fk_orphans_skipped
-        )?;
-    }
-
-    if !stats.warnings.is_empty() {
-        writeln!(writer, "--   Warnings: {}", stats.warnings.len())?;
-    }
-
-    writeln!(writer)?;
-
-    Ok(())
+        stats.total_rows_selected,
+        stats.total_rows_seen,
+        "skipped",
+        stats.fk_orphans_skipped,
+        &stats.warnings,
+    )
 }

@@ -95,76 +95,8 @@ fn escape_mermaid_type(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::view::{Cardinality, ColumnInfo, EdgeInfo, TableInfo};
-    use ahash::AHashMap;
 
-    fn create_test_view() -> GraphView {
-        let mut tables = AHashMap::new();
-
-        tables.insert(
-            "users".to_string(),
-            TableInfo {
-                name: "users".to_string(),
-                columns: vec![
-                    ColumnInfo {
-                        name: "id".to_string(),
-                        col_type: "INT".to_string(),
-                        is_primary_key: true,
-                        is_foreign_key: false,
-                        is_nullable: false,
-                        references_table: None,
-                        references_column: None,
-                    },
-                    ColumnInfo {
-                        name: "email".to_string(),
-                        col_type: "VARCHAR(255)".to_string(),
-                        is_primary_key: false,
-                        is_foreign_key: false,
-                        is_nullable: true,
-                        references_table: None,
-                        references_column: None,
-                    },
-                ],
-            },
-        );
-
-        tables.insert(
-            "orders".to_string(),
-            TableInfo {
-                name: "orders".to_string(),
-                columns: vec![
-                    ColumnInfo {
-                        name: "id".to_string(),
-                        col_type: "INT".to_string(),
-                        is_primary_key: true,
-                        is_foreign_key: false,
-                        is_nullable: false,
-                        references_table: None,
-                        references_column: None,
-                    },
-                    ColumnInfo {
-                        name: "user_id".to_string(),
-                        col_type: "INT".to_string(),
-                        is_primary_key: false,
-                        is_foreign_key: true,
-                        is_nullable: false,
-                        references_table: Some("users".to_string()),
-                        references_column: Some("id".to_string()),
-                    },
-                ],
-            },
-        );
-
-        let edges = vec![EdgeInfo {
-            from_table: "orders".to_string(),
-            from_column: "user_id".to_string(),
-            to_table: "users".to_string(),
-            to_column: "id".to_string(),
-            cardinality: Cardinality::ManyToOne,
-        }];
-
-        GraphView { tables, edges }
-    }
+    use crate::graph::test_fixtures::create_test_view;
 
     #[test]
     fn test_mermaid_er_diagram() {

@@ -1,6 +1,6 @@
 //! Graph command implementation for ERD generation.
 
-use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, OUTPUT_FORMAT};
+use super::common::{comma_list, BEHAVIOR, FILTERING, INPUT_OUTPUT, OUTPUT_FORMAT};
 use crate::graph::{
     cyclic_tables, find_cycles, to_dot, to_html, to_json, to_mermaid, GraphView, Layout,
     OutputFormat,
@@ -120,10 +120,8 @@ pub fn run(args: GraphArgs) -> Result<()> {
         .unwrap_or(Layout::LR);
 
     // Parse table filters
-    let tables_filter: Option<Vec<String>> =
-        tables.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
-    let exclude_filter: Option<Vec<String>> =
-        exclude.map(|e| e.split(',').map(|s| s.trim().to_string()).collect());
+    let tables_filter: Option<Vec<String>> = tables.as_deref().map(comma_list);
+    let exclude_filter: Option<Vec<String>> = exclude.as_deref().map(comma_list);
 
     if !file.exists() {
         bail!("input file does not exist: {}", file.display());

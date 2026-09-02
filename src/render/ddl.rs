@@ -206,10 +206,13 @@ fn identity_clause(dialect: SqlDialect) -> &'static str {
 }
 
 /// Quote and comma-join a list of column names for the given dialect.
-fn join_idents(dialect: SqlDialect, names: &[String]) -> String {
+pub(super) fn join_idents<S: AsRef<str>>(
+    dialect: SqlDialect,
+    names: impl IntoIterator<Item = S>,
+) -> String {
     names
-        .iter()
-        .map(|name| quote_identifier(dialect, name))
+        .into_iter()
+        .map(|name| quote_identifier(dialect, name.as_ref()))
         .collect::<Vec<_>>()
         .join(", ")
 }

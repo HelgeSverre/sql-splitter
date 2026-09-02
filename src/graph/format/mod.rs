@@ -15,6 +15,14 @@ pub use mermaid::to_mermaid;
 use std::fmt;
 use std::str::FromStr;
 
+/// Escape `&`, `<`, `>` and `"` for embedding in HTML (page text or DOT HTML labels).
+pub(crate) fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// Output format for ERD export
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {

@@ -14,9 +14,9 @@ use std::io::{self, BufWriter, Write};
 
 use crate::convert::{ConvertWarning, WarningCollector};
 use crate::generate::{GenerateError, GeneratedRow, GeneratedValue, PlannedTable, RowSink};
+use crate::parser::postgres_copy::copy_escape;
 use crate::parser::SqlDialect;
 use crate::synthetic::OutputMode;
-use crate::transform_common::quote_identifier;
 
 use super::ddl;
 use super::row_batch::RowBatch;
@@ -512,11 +512,10 @@ fn fmt_err(_: fmt::Error) -> GenerateError {
 
 /// Quote and comma-join the table's column names at `indices`, in order.
 fn quoted_column_list(dialect: SqlDialect, table: &PlannedTable, indices: &[usize]) -> String {
-    indices
-        .iter()
-        .map(|&i| quote_identifier(dialect, &table.columns[i].schema.name))
-        .collect::<Vec<_>>()
-        .join(", ")
+    ddl::join_idents(
+        dialect,
+        indices.iter().map(|&i| &table.columns[i].schema.name),
+    )
 }
 
 /// One `INSERT` row tuple: `(v1, v2, ...)`, written straight into the
@@ -689,12 +688,9 @@ impl fmt::Display for CopyValue<'_> {
 /// other character (including `'`) is copied through unquoted.
 fn write_copy_escaped(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
     for ch in value.chars() {
-        match ch {
-            '\\' => f.write_str("\\\\")?,
-            '\t' => f.write_str("\\t")?,
-            '\n' => f.write_str("\\n")?,
-            '\r' => f.write_str("\\r")?,
-            other => f.write_char(other)?,
+        match u8::try_from(ch).ok().and_then(copy_escape) {
+            Some(esc) => f.write_str(esc)?,
+            None => f.write_char(ch)?,
         }
     }
     Ok(())

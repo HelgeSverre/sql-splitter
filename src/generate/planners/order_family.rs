@@ -40,12 +40,14 @@ use serde_yaml_ng::Value;
 use crate::diagnostic::DiagnosticBag;
 use crate::generate::registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism,
-    PlannerDescriptor, PlannerFactory, Verification,
+    PlannerDescriptor, Verification,
 };
 use crate::generate::seed::{SeedRoot, StreamId};
-use crate::generate::value::{GenerateError, GeneratedValue};
+use crate::generate::value::{format_decimal, GenerateError, GeneratedValue};
 use crate::synthetic::model::PlannerConfig;
 use crate::synthetic::schema::{PortableTable, SqlTypeFamily};
+
+use super::{as_f64, as_i128, planner_factory, role_name};
 
 /// The rational denominator every tax/discount rate is expressed over, giving
 /// six decimal digits of rate precision (enough for `0.0`, `0.08`, `0.25`, …)
@@ -132,20 +134,11 @@ pub static COMMERCE_ORDER_FAMILY_DESCRIPTOR: PlannerDescriptor = PlannerDescript
 /// Factory for the `commerce.order_family` planner.
 pub struct OrderFamilyFactory;
 
-impl PlannerFactory for OrderFamilyFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &COMMERCE_ORDER_FAMILY_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_order_family(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    OrderFamilyFactory,
+    COMMERCE_ORDER_FAMILY_DESCRIPTOR,
+    compile_order_family
+);
 
 // --- Rounding / allocation --------------------------------------------------
 
@@ -860,7 +853,7 @@ impl OrderFamilyPlanner {
                 scale: self.scale,
             },
             SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => GeneratedValue::Integer(minor),
-            _ => GeneratedValue::Text(format_minor(minor, self.scale)),
+            _ => GeneratedValue::Text(format_decimal(minor, self.scale)),
         }
     }
 
@@ -1084,20 +1077,6 @@ fn rounded_rate(amount: i128, rate_num: i128) -> Result<i128, GenerateError> {
         .ok_or_else(|| overflow("rate * amount"))?;
     // Round half up on the (non-negative) amounts money families use here.
     Ok((numerator + RATE_DEN / 2).div_euclid(RATE_DEN))
-}
-
-/// Format minor units as a fixed-point decimal string for a non-decimal money
-/// column (a text fallback).
-fn format_minor(minor: i128, scale: u32) -> String {
-    if scale == 0 {
-        return minor.to_string();
-    }
-    let divisor = 10i128.pow(scale);
-    let sign = if minor < 0 { "-" } else { "" };
-    let magnitude = minor.abs();
-    let whole = magnitude / divisor;
-    let frac = magnitude % divisor;
-    format!("{sign}{whole}.{frac:0width$}", width = scale as usize)
 }
 
 /// The `GEN-ORDER-FAMILY-OVERFLOW` runtime overflow error.
@@ -1754,10 +1733,6 @@ fn unit_price_range(value: Option<&Value>, scale: u32) -> IntRange {
     }
 }
 
-fn role_name<'a>(columns: Option<&'a Value>, role: &str) -> Option<&'a str> {
-    columns?.get(role).and_then(Value::as_str)
-}
-
 fn string_arg<'a>(config: &'a PlannerConfig, key: &str) -> Option<&'a str> {
     config.args.get(key).and_then(Value::as_str)
 }
@@ -1771,26 +1746,6 @@ fn number_list(value: Option<&Value>) -> Vec<f64> {
 
 fn as_u32(value: &Value) -> Option<u32> {
     as_i128(value).and_then(|v| u32::try_from(v).ok())
-}
-
-fn as_i128(value: &Value) -> Option<i128> {
-    match value {
-        Value::Number(number) => number
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| number.as_u64().map(i128::from))
-            .or_else(|| number.as_f64().map(|float| float as i128)),
-        Value::String(text) => text.trim().parse::<i128>().ok(),
-        _ => None,
-    }
-}
-
-fn as_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().parse::<f64>().ok(),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -1870,10 +1825,10 @@ mod tests {
 
     #[test]
     fn format_minor_renders_fixed_point() {
-        assert_eq!(format_minor(1050, 2), "10.50");
-        assert_eq!(format_minor(5, 2), "0.05");
-        assert_eq!(format_minor(-1234, 2), "-12.34");
-        assert_eq!(format_minor(42, 0), "42");
+        assert_eq!(format_decimal(1050, 2), "10.50");
+        assert_eq!(format_decimal(5, 2), "0.05");
+        assert_eq!(format_decimal(-1234, 2), "-12.34");
+        assert_eq!(format_decimal(42, 0), "42");
     }
 
     #[test]

@@ -13,6 +13,52 @@ pub(crate) const BEHAVIOR: &str = "Behavior";
 pub(crate) const LIMITS: &str = "Limits";
 pub(crate) const OUTPUT_FORMAT: &str = "Output";
 
+/// Split a comma-separated CLI list into trimmed items.
+pub(crate) fn comma_list(s: &str) -> Vec<String> {
+    s.split(',').map(|s| s.trim().to_string()).collect()
+}
+
+/// Print the shared row-count trailer of a sample/shard statistics block.
+pub(crate) fn print_row_totals(
+    selected: u64,
+    seen: u64,
+    fk_orphans_label: &str,
+    fk_orphans: u64,
+    warnings: &[String],
+) {
+    eprintln!(
+        "  Total rows: {} / {} ({:.1}%)",
+        selected,
+        seen,
+        crate::transform_common::percent(selected, seen)
+    );
+    if fk_orphans > 0 {
+        eprintln!("  FK orphans {}: {}", fk_orphans_label, fk_orphans);
+    }
+    if !warnings.is_empty() {
+        eprintln!();
+        for warning in warnings {
+            eprintln!("  Warning: {}", warning);
+        }
+    }
+}
+
+/// Print the dry-run per-table breakdown: `(name, classification label, selected, seen)`.
+pub(crate) fn print_table_breakdown<'a>(rows: impl Iterator<Item = (&'a str, &'a str, u64, u64)>) {
+    eprintln!();
+    eprintln!("Per-table breakdown:");
+    for (name, label, selected, seen) in rows {
+        eprintln!(
+            "  {}{}: {} / {} rows ({:.1}%)",
+            name,
+            label,
+            selected,
+            seen,
+            crate::transform_common::percent(selected, seen)
+        );
+    }
+}
+
 /// Treat an output path of `-` as "write to stdout" (Unix convention).
 pub(crate) fn dash_is_stdout(output: Option<PathBuf>) -> Option<PathBuf> {
     output.filter(|p| p.as_os_str() != "-")

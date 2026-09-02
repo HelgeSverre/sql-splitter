@@ -2,7 +2,7 @@
 
 use super::batch::{flush_batch, BatchManager, MAX_ROWS_PER_BATCH};
 use super::types::TypeConverter;
-use super::{ImportStats, QueryConfig};
+use super::{is_missing_table_error, ImportStats, QueryConfig};
 use crate::convert::copy_to_insert::{
     copy_rows_to_insert, parse_copy_data, parse_copy_header, CopyHeader, CopyValue,
     MAX_ROWS_PER_INSERT,
@@ -16,8 +16,24 @@ use duckdb::Connection;
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::borrow::Cow;
 use std::io::Read;
 use std::path::Path;
+
+/// A regex and its replacement, applied in table order by `apply_rules`.
+type Rule = (&'static Lazy<Regex>, &'static str);
+
+/// Run each rule's `replace_all` in order, only allocating when one matches.
+fn apply_rules<'a>(rules: &[Rule], input: &'a str) -> Cow<'a, str> {
+    let mut result = Cow::Borrowed(input);
+    for (re, replacement) in rules {
+        let replaced = re.replace_all(&result, *replacement);
+        if let Cow::Owned(s) = replaced {
+            result = Cow::Owned(s);
+        }
+    }
+    result
+}
 
 /// Loads SQL dumps into a DuckDB database
 pub struct DumpLoader<'a> {
@@ -280,7 +296,7 @@ impl<'a> DumpLoader<'a> {
                 }
                 Err(e) => {
                     // If table doesn't exist, mark it and skip future inserts
-                    if Self::is_missing_table_error(&e) {
+                    if is_missing_table_error(&e) {
                         Self::mark_missing_copy_table(header, stats, failed_tables);
                         return; // Skip rest of batch
                     }
@@ -312,23 +328,13 @@ impl<'a> DumpLoader<'a> {
 
             match self.conn.execute(&insert_sql, []) {
                 Ok(_) => stats.rows_inserted += 1,
-                Err(e) if Self::is_missing_table_error(&e) => {
+                Err(e) if is_missing_table_error(&e) => {
                     Self::mark_missing_copy_table(header, stats, failed_tables);
                     return;
                 }
                 Err(e) => Self::record_copy_insert_error(header, &e, stats),
             }
         }
-    }
-
-    /// DuckDB reports FK violations with "does not exist" in the message, so
-    /// only a catalog missing-table error may disable later COPY batches.
-    fn is_missing_table_error(error: &duckdb::Error) -> bool {
-        matches!(
-            error,
-            duckdb::Error::DuckDBFailure(_, Some(message))
-                if message.starts_with("Catalog Error: Table with name ")
-        )
     }
 
     fn mark_missing_copy_table(
@@ -724,55 +730,47 @@ impl<'a> DumpLoader<'a> {
 
     /// Strip MySQL-specific clauses
     fn strip_mysql_clauses(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
         // Remove ENGINE clause
         static RE_ENGINE: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*ENGINE\s*=\s*\w+").unwrap());
-        result = RE_ENGINE.replace_all(&result, "").to_string();
 
         // Remove AUTO_INCREMENT clause at table level
         static RE_AUTO_INC: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*AUTO_INCREMENT\s*=\s*\d+").unwrap());
-        result = RE_AUTO_INC.replace_all(&result, "").to_string();
+
+        static TABLE_OPTIONS: &[Rule] = &[(&RE_ENGINE, ""), (&RE_AUTO_INC, "")];
 
         // Remove column AUTO_INCREMENT
-        result = result.replace(" AUTO_INCREMENT", "");
-        result = result.replace(" auto_increment", "");
+        let result = apply_rules(TABLE_OPTIONS, stmt)
+            .replace(" AUTO_INCREMENT", "")
+            .replace(" auto_increment", "");
 
         // Remove CHARACTER SET in column definitions (must come before CHARSET)
         static RE_CHAR_SET: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*CHARACTER\s+SET\s+\w+").unwrap());
-        result = RE_CHAR_SET.replace_all(&result, "").to_string();
 
         // Remove DEFAULT CHARSET
         static RE_CHARSET: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*(DEFAULT\s+)?CHARSET\s*=\s*\w+").unwrap());
-        result = RE_CHARSET.replace_all(&result, "").to_string();
 
         // Remove COLLATE
         static RE_COLLATE: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*COLLATE\s*=?\s*\w+").unwrap());
-        result = RE_COLLATE.replace_all(&result, "").to_string();
 
         // Remove ROW_FORMAT
         static RE_ROW_FORMAT: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*ROW_FORMAT\s*=\s*\w+").unwrap());
-        result = RE_ROW_FORMAT.replace_all(&result, "").to_string();
 
         // Remove KEY_BLOCK_SIZE
         static RE_KEY_BLOCK: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*KEY_BLOCK_SIZE\s*=\s*\d+").unwrap());
-        result = RE_KEY_BLOCK.replace_all(&result, "").to_string();
 
         // Remove COMMENT
         static RE_COMMENT: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*COMMENT\s*=?\s*'[^']*'").unwrap());
-        result = RE_COMMENT.replace_all(&result, "").to_string();
 
         // Remove MySQL conditional comments
         static RE_COND_COMMENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"/\*!\d+\s*|\*/").unwrap());
-        result = RE_COND_COMMENT.replace_all(&result, "").to_string();
 
         // Remove ON UPDATE CURRENT_TIMESTAMP, including MySQL 8's function-call
         // spelling CURRENT_TIMESTAMP() / CURRENT_TIMESTAMP(6). Without the
@@ -782,15 +780,11 @@ impl<'a> DumpLoader<'a> {
         static RE_ON_UPDATE: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r"(?i)\s*ON\s+UPDATE\s+CURRENT_TIMESTAMP(?:\s*\(\s*\d*\s*\))?").unwrap()
         });
-        result = RE_ON_UPDATE.replace_all(&result, "").to_string();
 
         // MySQL 8 also allows CURRENT_TIMESTAMP as a function call in DEFAULT
         // position; DuckDB only accepts the bare keyword there.
         static RE_DEFAULT_CURRENT_TIMESTAMP_CALL: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)(DEFAULT\s+CURRENT_TIMESTAMP)\s*\(\s*\d*\s*\)").unwrap());
-        result = RE_DEFAULT_CURRENT_TIMESTAMP_CALL
-            .replace_all(&result, "$1")
-            .to_string();
 
         // Remove the index-algorithm hint MySQL allows after any key's column
         // list -- `KEY foo (col) USING BTREE`, and the same on UNIQUE KEY and
@@ -801,14 +795,12 @@ impl<'a> DumpLoader<'a> {
         // (DuckDB needs it), so this is the only place its USING gets removed.
         static RE_KEY_USING: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\)\s*USING\s+(?:BTREE|HASH|RTREE)").unwrap());
-        result = RE_KEY_USING.replace_all(&result, ")").to_string();
 
         // Remove UNIQUE KEY constraint lines: UNIQUE KEY `name` (`col1`, `col2`)
         // Must handle both: ,UNIQUE KEY... at end of column list and UNIQUE KEY... on its own line
         static RE_UNIQUE_KEY: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r#"(?i),?\s*UNIQUE\s+KEY\s+[`"']?\w+[`"']?\s*\([^)]+\)"#).unwrap()
         });
-        result = RE_UNIQUE_KEY.replace_all(&result, "").to_string();
 
         // Remove KEY (index) constraint lines: KEY `name` (`col1`, `col2`)
         // This handles regular indexes and FULLTEXT indexes, but NOT PRIMARY KEY or FOREIGN KEY
@@ -819,12 +811,26 @@ impl<'a> DumpLoader<'a> {
             )
             .unwrap()
         });
-        result = RE_KEY_INDEX.replace_all(&result, "").to_string();
+
+        static COLUMN_AND_KEY_RULES: &[Rule] = &[
+            (&RE_CHAR_SET, ""),
+            (&RE_CHARSET, ""),
+            (&RE_COLLATE, ""),
+            (&RE_ROW_FORMAT, ""),
+            (&RE_KEY_BLOCK, ""),
+            (&RE_COMMENT, ""),
+            (&RE_COND_COMMENT, ""),
+            (&RE_ON_UPDATE, ""),
+            (&RE_DEFAULT_CURRENT_TIMESTAMP_CALL, "$1"),
+            (&RE_KEY_USING, ")"),
+            (&RE_UNIQUE_KEY, ""),
+            (&RE_KEY_INDEX, ""),
+        ];
 
         // Remove GENERATED ALWAYS AS columns entirely. DuckDB support for
         // computed columns doesn't reliably track MySQL's expression
         // dialect, so these are dropped rather than translated.
-        result = Self::strip_generated_columns(&result);
+        let result = Self::strip_generated_columns(&apply_rules(COLUMN_AND_KEY_RULES, &result));
 
         // Remove entire FOREIGN KEY constraints (DuckDB enforces them which causes issues with batch loading)
         // Match: CONSTRAINT `name` FOREIGN KEY (...) REFERENCES ... [ON DELETE/UPDATE ...]
@@ -832,9 +838,8 @@ impl<'a> DumpLoader<'a> {
         static RE_FK_CONSTRAINT: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r#"(?i),?\s*(?:CONSTRAINT\s+[`"']?\w+[`"']?\s+)?FOREIGN\s+KEY\s*\([^)]+\)\s*REFERENCES\s+[`"']?\w+[`"']?\s*\([^)]+\)(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION|RESTRICT))*"#).unwrap()
         });
-        result = RE_FK_CONSTRAINT.replace_all(&result, "").to_string();
 
-        result
+        apply_rules(&[(&RE_FK_CONSTRAINT, "")], &result).into_owned()
     }
 
     /// Remove `col TYPE GENERATED ALWAYS AS (expr) STORED/VIRTUAL` column
@@ -925,39 +930,36 @@ impl<'a> DumpLoader<'a> {
 
     /// Strip PostgreSQL-specific syntax
     fn strip_postgres_syntax(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // Remove schema prefix
-        result = Self::strip_schema_prefix(&result);
-
         // Remove type casts
         static RE_CAST: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r"::[a-zA-Z_][a-zA-Z0-9_]*(?:\s+[a-zA-Z_][a-zA-Z0-9_]*)*").unwrap()
         });
-        result = RE_CAST.replace_all(&result, "").to_string();
 
         // Remove nextval() - DuckDB handles sequences differently
         static RE_NEXTVAL: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*DEFAULT\s+nextval\s*\([^)]+\)").unwrap());
-        result = RE_NEXTVAL.replace_all(&result, "").to_string();
 
         // Convert now() to CURRENT_TIMESTAMP
         static RE_NOW: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\bDEFAULT\s+now\s*\(\s*\)").unwrap());
-        result = RE_NOW
-            .replace_all(&result, "DEFAULT CURRENT_TIMESTAMP")
-            .to_string();
 
         // Remove INHERITS clause
         static RE_INHERITS: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*INHERITS\s*\([^)]+\)").unwrap());
-        result = RE_INHERITS.replace_all(&result, "").to_string();
 
         // Remove WITH clause (storage parameters)
         static RE_WITH: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*WITH\s*\([^)]+\)").unwrap());
-        result = RE_WITH.replace_all(&result, "").to_string();
 
-        result
+        static RULES: &[Rule] = &[
+            (&RE_CAST, ""),
+            (&RE_NEXTVAL, ""),
+            (&RE_NOW, "DEFAULT CURRENT_TIMESTAMP"),
+            (&RE_INHERITS, ""),
+            (&RE_WITH, ""),
+        ];
+
+        // Remove schema prefix, then the rest
+        apply_rules(RULES, &Self::strip_schema_prefix(stmt)).into_owned()
     }
 
     /// Strip schema prefix (e.g., public.users -> users)
@@ -977,89 +979,82 @@ impl<'a> DumpLoader<'a> {
 
     /// Strip MSSQL-specific syntax
     fn strip_mssql_syntax(stmt: &str) -> String {
-        let mut result = Self::strip_mssql_schema_prefix(stmt);
-
         // Remove IDENTITY clause and make the column nullable (so INSERTs without id work)
         // Pattern matches: INT IDENTITY(1,1) NOT NULL -> INT
         static RE_IDENTITY_NOT_NULL: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r"(?i)\s*IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)\s*NOT\s+NULL").unwrap()
         });
-        result = RE_IDENTITY_NOT_NULL.replace_all(&result, "").to_string();
 
         // Also handle IDENTITY without NOT NULL
         static RE_IDENTITY: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*IDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)").unwrap());
-        result = RE_IDENTITY.replace_all(&result, "").to_string();
 
         // Remove CLUSTERED/NONCLUSTERED
         static RE_CLUSTERED: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\s*(?:NON)?CLUSTERED\s*").unwrap());
-        result = RE_CLUSTERED.replace_all(&result, " ").to_string();
 
         // Remove ON [PRIMARY] (filegroup)
         static RE_FILEGROUP: Lazy<Regex> =
             Lazy::new(|| Regex::new(r#"(?i)\s*ON\s*"?PRIMARY"?"#).unwrap());
-        result = RE_FILEGROUP.replace_all(&result, "").to_string();
 
         // Remove PRIMARY KEY constraints (they make columns NOT NULL which breaks IDENTITY column INSERTs)
         static RE_PK_CONSTRAINT: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r#"(?i),?\s*CONSTRAINT\s+"?\w+"?\s+PRIMARY\s+KEY\s+\([^)]+\)"#).unwrap()
         });
-        result = RE_PK_CONSTRAINT.replace_all(&result, "").to_string();
 
         // Remove FOREIGN KEY constraints (analytics queries don't need FK enforcement)
         static RE_FK_CONSTRAINT: Lazy<Regex> = Lazy::new(|| {
             Regex::new(r#"(?i),?\s*CONSTRAINT\s+"?\w+"?\s+FOREIGN\s+KEY\s*\([^)]+\)\s*REFERENCES\s+[^\s(]+\s*\([^)]+\)"#).unwrap()
         });
-        result = RE_FK_CONSTRAINT.replace_all(&result, "").to_string();
 
         // Remove WITH clause for indexes
         static RE_WITH: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*WITH\s*\([^)]+\)").unwrap());
-        result = RE_WITH.replace_all(&result, "").to_string();
 
         // Remove TEXTIMAGE_ON
         static RE_TEXTIMAGE: Lazy<Regex> =
             Lazy::new(|| Regex::new(r#"(?i)\s*TEXTIMAGE_ON\s*"?\w+"?"#).unwrap());
-        result = RE_TEXTIMAGE.replace_all(&result, "").to_string();
 
         // Convert GETDATE() to CURRENT_TIMESTAMP
         static RE_GETDATE: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\bGETDATE\s*\(\s*\)").unwrap());
-        result = RE_GETDATE
-            .replace_all(&result, "CURRENT_TIMESTAMP")
-            .to_string();
 
         // Convert NEWID() to gen_random_uuid()
         static RE_NEWID: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bNEWID\s*\(\s*\)").unwrap());
-        result = RE_NEWID
-            .replace_all(&result, "gen_random_uuid()")
-            .to_string();
 
-        result
+        static RULES: &[Rule] = &[
+            (&RE_IDENTITY_NOT_NULL, ""),
+            (&RE_IDENTITY, ""),
+            (&RE_CLUSTERED, " "),
+            (&RE_FILEGROUP, ""),
+            (&RE_PK_CONSTRAINT, ""),
+            (&RE_FK_CONSTRAINT, ""),
+            (&RE_WITH, ""),
+            (&RE_TEXTIMAGE, ""),
+            (&RE_GETDATE, "CURRENT_TIMESTAMP"),
+            (&RE_NEWID, "gen_random_uuid()"),
+        ];
+
+        apply_rules(RULES, &Self::strip_mssql_schema_prefix(stmt)).into_owned()
     }
 
     /// Strip SQLite-specific syntax not supported by DuckDB
     fn strip_sqlite_syntax(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // Remove AUTOINCREMENT (DuckDB handles auto-increment via sequences)
-        // SQLite uses "INTEGER PRIMARY KEY AUTOINCREMENT"
-        result = result.replace(" AUTOINCREMENT", "");
-        result = result.replace(" autoincrement", "");
-
-        // Remove IF NOT EXISTS (DuckDB supports this but we want clean imports)
-        // Actually DuckDB does support IF NOT EXISTS, so leave it
-
         // Remove STRICT table modifier (SQLite 3.37+)
         static RE_STRICT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\)\s*STRICT\s*;").unwrap());
-        result = RE_STRICT.replace_all(&result, ");").to_string();
 
         // Remove WITHOUT ROWID (SQLite optimization not needed for analytics)
         static RE_WITHOUT_ROWID: Lazy<Regex> =
             Lazy::new(|| Regex::new(r"(?i)\)\s*WITHOUT\s+ROWID\s*;").unwrap());
-        result = RE_WITHOUT_ROWID.replace_all(&result, ");").to_string();
 
-        result
+        static RULES: &[Rule] = &[(&RE_STRICT, ");"), (&RE_WITHOUT_ROWID, ");")];
+
+        // Remove AUTOINCREMENT (DuckDB handles auto-increment via sequences)
+        // SQLite uses "INTEGER PRIMARY KEY AUTOINCREMENT"
+        // DuckDB supports IF NOT EXISTS, so that is left alone.
+        let result = stmt
+            .replace(" AUTOINCREMENT", "")
+            .replace(" autoincrement", "");
+        apply_rules(RULES, &result).into_owned()
     }
 
     /// Count rows in an INSERT statement

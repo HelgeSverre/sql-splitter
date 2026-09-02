@@ -1016,4 +1016,395 @@ mod tests {
         assert_eq!(users.primary_key.len(), 1);
         assert_eq!(users.columns[0].name, "id");
     }
+
+    // -----------------------------------------------------------------------
+    // Uncovered lines: normalize_qualified_identifier, extract_table_body
+    // comments, inline CHECK.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalize_qualified_identifier_edge_cases() {
+        assert_eq!(normalize_qualified_identifier("a . b"), Some("a.b".into()));
+        // Trailing dot then only whitespace: the second part is absent.
+        assert_eq!(normalize_qualified_identifier("a. "), Some("a".into()));
+        assert_eq!(normalize_qualified_identifier("   "), None);
+        assert_eq!(normalize_qualified_identifier(""), None);
+        // Unterminated / empty quoted part.
+        assert_eq!(normalize_qualified_identifier("\"abc"), None);
+        assert_eq!(normalize_qualified_identifier("``"), None);
+        assert_eq!(normalize_qualified_identifier("[a]]b]"), Some("a]b".into()));
+    }
+
+    #[test]
+    fn table_body_after_line_comment_between_name_and_paren() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE t -- comment (with parens)\n(id INT);");
+        let schema = builder.build();
+        assert_eq!(schema.get_table("t").unwrap().columns[0].name, "id");
+    }
+
+    #[test]
+    fn line_comment_running_to_eof_yields_no_body() {
+        let mut builder = SchemaBuilder::new();
+        assert_eq!(
+            builder.parse_create_table("CREATE TABLE t -- (id INT)"),
+            None
+        );
+    }
+
+    #[test]
+    fn table_body_after_block_comment_between_name_and_paren() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE t /* c (x) */ /* d */ (id INT);");
+        let schema = builder.build();
+        assert_eq!(schema.get_table("t").unwrap().columns[0].name, "id");
+    }
+
+    #[test]
+    fn unterminated_block_comment_before_body_yields_none() {
+        let mut builder = SchemaBuilder::new();
+        assert_eq!(
+            builder.parse_create_table("CREATE TABLE t /* c (id INT);"),
+            None
+        );
+    }
+
+    #[test]
+    fn inline_column_check_is_attached_to_table() {
+        let mut builder = SchemaBuilder::new();
+        builder.parse_create_table("CREATE TABLE t (a INT CHECK (a > 0), b INT CHECK);");
+        let schema = builder.build();
+        let t = schema.get_table("t").unwrap();
+        assert_eq!(
+            t.check_constraints,
+            vec![CheckConstraint {
+                name: None,
+                expression: "a > 0".into()
+            }]
+        );
+        assert_eq!(t.columns.len(), 2);
+        assert_eq!(t.columns[1].source_type, "INT");
+    }
+
+    // -----------------------------------------------------------------------
+    // Side-by-side pins of the two DDL lexers. `tokenize_ddl` is this
+    // module's char-level lexer; `convert::ddl::tokenize` is the byte-level,
+    // dialect-aware one. Tests ending in `_diverges` document a disagreement
+    // for the same input, one assertion per lexer.
+    // -----------------------------------------------------------------------
+
+    use crate::convert::ddl::{table_ddl_type_refs, tokenize, LexRules, Token};
+    use crate::parser::SqlDialect;
+
+    fn mysql(stmt: &str) -> Vec<Token> {
+        tokenize(stmt, LexRules::for_dialect(SqlDialect::MySql))
+    }
+
+    fn pg(stmt: &str) -> Vec<Token> {
+        tokenize(stmt, LexRules::for_dialect(SqlDialect::Postgres))
+    }
+
+    fn columns(stmt: &str, dialect: SqlDialect) -> Vec<String> {
+        table_ddl_type_refs(stmt, dialect)
+            .into_iter()
+            .map(|r| r.column)
+            .collect()
+    }
+
+    #[test]
+    fn lexers_backslash_quote_diverges() {
+        // convert, MySQL: `\'` is an escaped quote — one decoded string.
+        assert_eq!(mysql(r"'it\'s'"), vec![Token::Str(0, 7, "it's".into())]);
+        // convert, Postgres: `\` is literal; the string ends at the second
+        // quote, `s` is an identifier, the last quote opens an empty string.
+        assert_eq!(
+            pg(r"'it\'s'"),
+            vec![
+                Token::Str(0, 5, "it\\".into()),
+                Token::Ident(5, 6),
+                Token::Str(6, 7, String::new()),
+            ]
+        );
+        // schema: backslash is always an escape (MySQL semantics), raw text.
+        assert_eq!(tokenize_ddl(r"'it\'s' x"), vec![r"'it\'s'", "x"]);
+
+        let stmt = r"CREATE TABLE t (a text DEFAULT 'it\'s, z', m mood);";
+        assert_eq!(columns(stmt, SqlDialect::MySql), ["a", "m"]);
+        // Postgres: `, z'` splits the list and the final quote swallows `)`.
+        assert_eq!(columns(stmt, SqlDialect::Postgres), ["a"]);
+        assert_eq!(
+            split_table_body(r"a text DEFAULT 'it\'s, z', m mood"),
+            vec![r"a text DEFAULT 'it\'s, z'", "m mood"]
+        );
+    }
+
+    #[test]
+    fn lexers_trailing_backslash_diverges() {
+        assert_eq!(mysql(r"'a\"), vec![Token::Str(0, 3, "a".into())]);
+        assert_eq!(pg(r"'a\"), vec![Token::Str(0, 3, "a\\".into())]);
+        assert_eq!(tokenize_ddl(r"'a\"), vec![r"'a\"]);
+    }
+
+    #[test]
+    fn lexers_mysql_escape_sequences() {
+        assert_eq!(
+            mysql(r"'\b\n\r\t\Z\%\_\0\q'"),
+            vec![Token::Str(0, 20, "\u{8}\n\r\t\u{1a}\\%\\_\0q".into())]
+        );
+        assert_eq!(
+            pg(r"'\b\n\r\t\Z\%\_\0\q'"),
+            vec![Token::Str(0, 20, r"\b\n\r\t\Z\%\_\0\q".into())]
+        );
+        assert_eq!(
+            tokenize_ddl(r"'\b\n\r\t\Z\%\_\0\q'"),
+            vec![r"'\b\n\r\t\Z\%\_\0\q'"]
+        );
+    }
+
+    #[test]
+    fn lexers_doubled_single_quote_agree() {
+        assert_eq!(mysql("'it''s'"), vec![Token::Str(0, 7, "it's".into())]);
+        assert_eq!(pg("'it''s'"), vec![Token::Str(0, 7, "it's".into())]);
+        assert_eq!(tokenize_ddl("'it''s, z' x"), vec!["'it''s, z'", "x"]);
+        let stmt = "CREATE TABLE t (a text DEFAULT 'it''s, z', m mood);";
+        assert_eq!(columns(stmt, SqlDialect::MySql), ["a", "m"]);
+        assert_eq!(columns(stmt, SqlDialect::Postgres), ["a", "m"]);
+        assert_eq!(
+            split_table_body("a text DEFAULT 'it''s, z', m mood"),
+            vec!["a text DEFAULT 'it''s, z'", "m mood"]
+        );
+    }
+
+    #[test]
+    fn lexers_backtick_identifier_diverges() {
+        assert_eq!(
+            mysql("`a``b`"),
+            vec![Token::QuotedIdent(0, 6, "a`b".into())]
+        );
+        // Postgres rules: backtick is a stray byte.
+        assert_eq!(
+            pg("`a``b`"),
+            vec![
+                Token::Other(0, 1),
+                Token::Ident(1, 2),
+                Token::Other(2, 3),
+                Token::Other(3, 4),
+                Token::Ident(4, 5),
+                Token::Other(5, 6),
+            ]
+        );
+        // schema: no identifier quoting; whitespace inside splits.
+        assert_eq!(tokenize_ddl("`a``b`"), vec!["`a``b`"]);
+        assert_eq!(tokenize_ddl("`a b`"), vec!["`a", "b`"]);
+        assert_eq!(
+            columns("CREATE TABLE t (`a b` int, m mood);", SqlDialect::MySql),
+            ["a b", "m"]
+        );
+    }
+
+    #[test]
+    fn lexers_double_quote_identifier_diverges() {
+        assert_eq!(
+            pg(r#""a""b""#),
+            vec![Token::QuotedIdent(0, 6, "a\"b".into())]
+        );
+        // MySQL rules: `"..."` is a string (doubling and backslashes apply).
+        assert_eq!(mysql(r#""a""b""#), vec![Token::Str(0, 6, "a\"b".into())]);
+        assert_eq!(mysql(r#""a\"b""#), vec![Token::Str(0, 6, "a\"b".into())]);
+        assert_eq!(tokenize_ddl(r#""a""b""#), vec![r#""a""b""#]);
+        assert_eq!(tokenize_ddl(r#""a b""#), vec![r#""a"#, r#"b""#]);
+        assert_eq!(
+            columns(
+                r#"CREATE TABLE t ("a b" int, m mood);"#,
+                SqlDialect::Postgres
+            ),
+            ["a b", "m"]
+        );
+    }
+
+    #[test]
+    fn lexers_bracket_identifier() {
+        // convert (both dialects): brackets are punctuation, `]]` is two.
+        let expected = vec![
+            Token::Punct(0, b'['),
+            Token::Ident(1, 2),
+            Token::Punct(2, b']'),
+            Token::Punct(3, b']'),
+            Token::Ident(4, 5),
+            Token::Punct(5, b']'),
+        ];
+        assert_eq!(mysql("[a]]b]"), expected);
+        assert_eq!(pg("[a]]b]"), expected);
+        assert_eq!(tokenize_ddl("[a]]b]"), vec!["[a]]b]"]);
+        assert_eq!(tokenize_ddl("[a b]"), vec!["[a", "b]"]);
+    }
+
+    #[test]
+    fn lexers_nested_parentheses_agree() {
+        let stmt =
+            "CREATE TABLE t (a int CHECK (a > 0 AND (b < 1)), b text DEFAULT (('x')), c mood);";
+        assert_eq!(columns(stmt, SqlDialect::MySql), ["a", "b", "c"]);
+        assert_eq!(columns(stmt, SqlDialect::Postgres), ["a", "b", "c"]);
+        assert_eq!(
+            tokenize_ddl("CHECK (a > 0 AND (b < 1)) DEFAULT (('x'))"),
+            vec!["CHECK", "(a > 0 AND (b < 1))", "DEFAULT", "(('x'))"]
+        );
+        // Unbalanced `)` saturates instead of underflowing.
+        assert_eq!(tokenize_ddl(") x"), vec![")", "x"]);
+        // A paren inside a string does not change depth.
+        assert_eq!(tokenize_ddl("'(' x"), vec!["'('", "x"]);
+        assert_eq!(
+            columns(
+                "CREATE TABLE t (a text DEFAULT '(', m mood);",
+                SqlDialect::Postgres
+            ),
+            ["a", "m"]
+        );
+    }
+
+    #[test]
+    fn lexers_e_string() {
+        assert_eq!(
+            pg(r"E'a\'b\n'"),
+            vec![Token::Ident(0, 1), Token::Str(1, 9, "a'b\n".into())]
+        );
+        // The `E` prefix check is dialect-independent: MySQL rules decode
+        // `\x41` as Postgres would (`A`), not as MySQL would (`x41`).
+        assert_eq!(
+            mysql(r"E'\x41'"),
+            vec![Token::Ident(0, 1), Token::Str(1, 7, "A".into())]
+        );
+        assert_eq!(mysql(r"'\x41'"), vec![Token::Str(0, 6, "x41".into())]);
+        // An identifier merely ending in `e` is not a prefix.
+        assert_eq!(
+            pg(r"type'\'"),
+            vec![Token::Ident(0, 4), Token::Str(4, 7, "\\".into())]
+        );
+        // schema: raw, one token (backslash always escapes).
+        assert_eq!(tokenize_ddl(r"E'a\'b\n' x"), vec![r"E'a\'b\n'", "x"]);
+    }
+
+    #[test]
+    fn lexers_dollar_quoted_body_diverges() {
+        assert_eq!(pg("$$a,b$$"), vec![Token::Str(0, 7, "a,b".into())]);
+        assert_eq!(pg("$fn$x$fn$"), vec![Token::Str(0, 9, "x".into())]);
+        // MySQL rules: `$` is an identifier byte.
+        assert_eq!(
+            mysql("$$a,b$$"),
+            vec![
+                Token::Ident(0, 3),
+                Token::Punct(3, b','),
+                Token::Ident(4, 7)
+            ]
+        );
+        // schema: no dollar quoting; whitespace splits the body.
+        assert_eq!(tokenize_ddl("$$a b$$"), vec!["$$a", "b$$"]);
+        assert_eq!(split_table_body("$$a,b$$"), vec!["$$a", "b$$"]);
+        assert_eq!(
+            columns(
+                "CREATE TABLE t (a text DEFAULT $$x, y$$, m mood);",
+                SqlDialect::Postgres
+            ),
+            ["a", "m"]
+        );
+        assert_eq!(
+            split_table_body("a text DEFAULT $$x, y$$, m mood"),
+            vec!["a text DEFAULT $$x", "y$$", "m mood"]
+        );
+    }
+
+    #[test]
+    fn lexers_unterminated_or_invalid_dollar_tag() {
+        assert_eq!(
+            pg("$$abc"),
+            vec![
+                Token::Punct(0, b'$'),
+                Token::Punct(1, b'$'),
+                Token::Ident(2, 5)
+            ]
+        );
+        assert_eq!(
+            pg("$a b"),
+            vec![
+                Token::Punct(0, b'$'),
+                Token::Ident(1, 2),
+                Token::Whitespace(2, 3),
+                Token::Ident(3, 4),
+            ]
+        );
+        assert_eq!(pg("$1"), vec![Token::Punct(0, b'$'), Token::Ident(1, 2)]);
+        assert_eq!(tokenize_ddl("$$abc"), vec!["$$abc"]);
+    }
+
+    #[test]
+    fn lexers_comments_diverge() {
+        for lex in [mysql, pg] {
+            assert_eq!(
+                lex("-- x\nb"),
+                vec![
+                    Token::Comment(0, 4),
+                    Token::Whitespace(4, 5),
+                    Token::Ident(5, 6)
+                ]
+            );
+            assert_eq!(
+                lex("/* a */b"),
+                vec![Token::Comment(0, 7), Token::Ident(7, 8)]
+            );
+            assert_eq!(lex("/* a"), vec![Token::Comment(0, 4)]);
+            assert_eq!(lex("'-- x'"), vec![Token::Str(0, 6, "-- x".into())]);
+        }
+        // schema: comment text is ordinary tokens.
+        assert_eq!(tokenize_ddl("-- x\nb"), vec!["--", "x", "b"]);
+        assert_eq!(tokenize_ddl("/* a */b"), vec!["/*", "a", "*/b"]);
+
+        let stmt = "CREATE TABLE t (a int, -- trailing (x,\n b int);";
+        assert_eq!(columns(stmt, SqlDialect::MySql), ["a", "b"]);
+        assert_eq!(columns(stmt, SqlDialect::Postgres), ["a", "b"]);
+        // schema: `(` inside the comment never closes.
+        assert_eq!(
+            split_table_body("a int, -- trailing (x,\n b int"),
+            vec!["a int", "-- trailing (x,\n b int"]
+        );
+    }
+
+    #[test]
+    fn lexers_hash_comment_diverges() {
+        assert_eq!(
+            mysql("# c\nb"),
+            vec![
+                Token::Comment(0, 3),
+                Token::Whitespace(3, 4),
+                Token::Ident(4, 5)
+            ]
+        );
+        assert_eq!(
+            pg("# c\nb"),
+            vec![
+                Token::Other(0, 1),
+                Token::Whitespace(1, 2),
+                Token::Ident(2, 3),
+                Token::Whitespace(3, 4),
+                Token::Ident(4, 5),
+            ]
+        );
+        assert_eq!(tokenize_ddl("# c\nb"), vec!["#", "c", "b"]);
+    }
+
+    #[test]
+    fn lexers_unterminated_strings() {
+        assert_eq!(mysql("'abc"), vec![Token::Str(0, 4, "abc".into())]);
+        assert_eq!(pg("'abc"), vec![Token::Str(0, 4, "abc".into())]);
+        assert_eq!(pg("\"abc"), vec![Token::QuotedIdent(0, 4, "abc".into())]);
+        assert_eq!(mysql("\"abc"), vec![Token::Str(0, 4, "abc".into())]);
+        assert_eq!(mysql("`abc"), vec![Token::QuotedIdent(0, 4, "abc".into())]);
+        assert_eq!(tokenize_ddl("'abc def, x"), vec!["'abc def, x"]);
+        assert_eq!(tokenize_ddl("(a b, c"), vec!["(a b, c"]);
+        // convert: the string swallows `)`, no definition is flushed.
+        assert!(columns(
+            "CREATE TABLE t (a text DEFAULT 'oops, m mood);",
+            SqlDialect::Postgres
+        )
+        .is_empty());
+    }
 }

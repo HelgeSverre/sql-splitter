@@ -11,6 +11,7 @@
 use crate::parser::SqlDialect;
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
+use std::borrow::Cow;
 
 use super::warnings::{ConvertWarning, WarningCollector};
 
@@ -159,604 +160,268 @@ impl TypeMapper {
 
     fn convert_dialect_pair(stmt: &str, from: SqlDialect, to: SqlDialect) -> String {
         match (from, to) {
-            (SqlDialect::MySql, SqlDialect::Postgres) => Self::mysql_to_postgres(stmt),
-            (SqlDialect::MySql, SqlDialect::Sqlite) => Self::mysql_to_sqlite(stmt),
-            (SqlDialect::MySql, SqlDialect::Mssql) => Self::mysql_to_mssql(stmt),
-            (SqlDialect::Postgres, SqlDialect::MySql) => Self::postgres_to_mysql(stmt),
-            (SqlDialect::Postgres, SqlDialect::Sqlite) => Self::postgres_to_sqlite(stmt),
-            (SqlDialect::Postgres, SqlDialect::Mssql) => Self::postgres_to_mssql(stmt),
-            (SqlDialect::Sqlite, SqlDialect::MySql) => Self::sqlite_to_mysql(stmt),
-            (SqlDialect::Sqlite, SqlDialect::Postgres) => Self::sqlite_to_postgres(stmt),
-            (SqlDialect::Sqlite, SqlDialect::Mssql) => Self::sqlite_to_mssql(stmt),
-            (SqlDialect::Mssql, SqlDialect::MySql) => Self::mssql_to_mysql(stmt),
-            (SqlDialect::Mssql, SqlDialect::Postgres) => Self::mssql_to_postgres(stmt),
-            (SqlDialect::Mssql, SqlDialect::Sqlite) => Self::mssql_to_sqlite(stmt),
+            (SqlDialect::MySql, SqlDialect::Postgres) => apply(MYSQL_TO_POSTGRES, stmt),
+            (SqlDialect::MySql, SqlDialect::Sqlite) => apply(MYSQL_TO_SQLITE, stmt),
+            (SqlDialect::MySql, SqlDialect::Mssql) => apply(MYSQL_TO_MSSQL, stmt),
+            (SqlDialect::Postgres, SqlDialect::MySql) => apply(POSTGRES_TO_MYSQL, stmt),
+            (SqlDialect::Postgres, SqlDialect::Sqlite) => apply(POSTGRES_TO_SQLITE, stmt),
+            (SqlDialect::Postgres, SqlDialect::Mssql) => apply(POSTGRES_TO_MSSQL, stmt),
+            (SqlDialect::Sqlite, SqlDialect::MySql) => apply(SQLITE_TO_MYSQL, stmt),
+            (SqlDialect::Sqlite, SqlDialect::Postgres) => apply(SQLITE_TO_POSTGRES, stmt),
+            (SqlDialect::Sqlite, SqlDialect::Mssql) => apply(SQLITE_TO_MSSQL, stmt),
+            (SqlDialect::Mssql, SqlDialect::MySql) => apply(MSSQL_TO_MYSQL, stmt),
+            (SqlDialect::Mssql, SqlDialect::Postgres) => apply(MSSQL_TO_POSTGRES, stmt),
+            (SqlDialect::Mssql, SqlDialect::Sqlite) => apply(MSSQL_TO_SQLITE, stmt),
             _ => stmt.to_string(),
         }
     }
-
-    /// Convert MySQL types to PostgreSQL
-    fn mysql_to_postgres(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // Integer types - strip display width, PostgreSQL doesn't use it
-        result = RE_TINYINT_BOOL.replace_all(&result, "BOOLEAN").to_string();
-        result = RE_TINYINT.replace_all(&result, "SMALLINT").to_string();
-        result = RE_SMALLINT.replace_all(&result, "SMALLINT").to_string();
-        result = RE_MEDIUMINT.replace_all(&result, "INTEGER").to_string();
-        result = RE_INT_SIZE.replace_all(&result, "INTEGER").to_string();
-        result = RE_BIGINT_SIZE.replace_all(&result, "BIGINT").to_string();
-
-        // Float types
-        result = RE_DOUBLE
-            .replace_all(&result, "DOUBLE PRECISION")
-            .to_string();
-        result = RE_FLOAT.replace_all(&result, "REAL").to_string();
-
-        // Text types
-        result = RE_LONGTEXT.replace_all(&result, "TEXT").to_string();
-        result = RE_MEDIUMTEXT.replace_all(&result, "TEXT").to_string();
-        result = RE_TINYTEXT.replace_all(&result, "TEXT").to_string();
-
-        // Binary types
-        result = RE_LONGBLOB.replace_all(&result, "BYTEA").to_string();
-        result = RE_MEDIUMBLOB.replace_all(&result, "BYTEA").to_string();
-        result = RE_TINYBLOB.replace_all(&result, "BYTEA").to_string();
-        result = RE_BLOB.replace_all(&result, "BYTEA").to_string();
-        result = RE_VARBINARY.replace_all(&result, "BYTEA").to_string();
-        result = RE_BINARY.replace_all(&result, "BYTEA").to_string();
-
-        // Date/time types
-        result = RE_DATETIME.replace_all(&result, "TIMESTAMP").to_string();
-
-        // JSON
-        result = RE_JSON.replace_all(&result, "JSONB").to_string();
-
-        // ENUM - convert to VARCHAR (with warning)
-        result = RE_ENUM.replace_all(&result, "VARCHAR(255)").to_string();
-
-        // SET - convert to VARCHAR (with warning)
-        result = RE_SET.replace_all(&result, "VARCHAR(255)").to_string();
-
-        // UNSIGNED - remove
-        result = RE_UNSIGNED.replace_all(&result, "").to_string();
-
-        // ZEROFILL - remove
-        result = RE_ZEROFILL.replace_all(&result, "").to_string();
-
-        result
-    }
-
-    /// Convert MySQL types to SQLite
-    fn mysql_to_sqlite(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // SQLite is lenient with types, but we normalize for consistency
-
-        // Integer types - SQLite uses INTEGER
-        result = RE_TINYINT.replace_all(&result, "INTEGER").to_string();
-        result = RE_SMALLINT.replace_all(&result, "INTEGER").to_string();
-        result = RE_MEDIUMINT.replace_all(&result, "INTEGER").to_string();
-        result = RE_INT_SIZE.replace_all(&result, "INTEGER").to_string();
-        result = RE_BIGINT_SIZE.replace_all(&result, "INTEGER").to_string();
-
-        // Float types - SQLite uses REAL
-        result = RE_DOUBLE.replace_all(&result, "REAL").to_string();
-        result = RE_FLOAT.replace_all(&result, "REAL").to_string();
-        result = RE_DECIMAL.replace_all(&result, "REAL").to_string();
-
-        // Text types - all become TEXT
-        result = RE_LONGTEXT.replace_all(&result, "TEXT").to_string();
-        result = RE_MEDIUMTEXT.replace_all(&result, "TEXT").to_string();
-        result = RE_TINYTEXT.replace_all(&result, "TEXT").to_string();
-        result = RE_VARCHAR.replace_all(&result, "TEXT").to_string();
-        result = RE_CHAR.replace_all(&result, "TEXT").to_string();
-
-        // Binary types - SQLite uses BLOB
-        result = RE_LONGBLOB.replace_all(&result, "BLOB").to_string();
-        result = RE_MEDIUMBLOB.replace_all(&result, "BLOB").to_string();
-        result = RE_TINYBLOB.replace_all(&result, "BLOB").to_string();
-        result = RE_VARBINARY.replace_all(&result, "BLOB").to_string();
-        result = RE_BINARY.replace_all(&result, "BLOB").to_string();
-
-        // Date/time - SQLite stores as TEXT or INTEGER
-        result = RE_DATETIME.replace_all(&result, "TEXT").to_string();
-        result = RE_TIMESTAMP.replace_all(&result, "TEXT").to_string();
-        result = RE_DATE.replace_all(&result, "TEXT").to_string();
-        result = RE_TIME.replace_all(&result, "TEXT").to_string();
-
-        // JSON - SQLite stores as TEXT
-        result = RE_JSON.replace_all(&result, "TEXT").to_string();
-
-        // ENUM/SET - convert to TEXT
-        result = RE_ENUM.replace_all(&result, "TEXT").to_string();
-        result = RE_SET.replace_all(&result, "TEXT").to_string();
-
-        // UNSIGNED - remove
-        result = RE_UNSIGNED.replace_all(&result, "").to_string();
-
-        // ZEROFILL - remove
-        result = RE_ZEROFILL.replace_all(&result, "").to_string();
-
-        result
-    }
-
-    /// Convert PostgreSQL types to MySQL
-    fn postgres_to_mysql(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // SERIAL → INT AUTO_INCREMENT
-        result = RE_BIGSERIAL
-            .replace_all(&result, "BIGINT AUTO_INCREMENT")
-            .to_string();
-        result = RE_SERIAL
-            .replace_all(&result, "INT AUTO_INCREMENT")
-            .to_string();
-        result = RE_SMALLSERIAL
-            .replace_all(&result, "SMALLINT AUTO_INCREMENT")
-            .to_string();
-
-        // BYTEA → LONGBLOB
-        result = RE_BYTEA.replace_all(&result, "LONGBLOB").to_string();
-
-        // DOUBLE PRECISION → DOUBLE
-        result = RE_DOUBLE_PRECISION
-            .replace_all(&result, "DOUBLE")
-            .to_string();
-
-        // REAL → FLOAT
-        result = RE_REAL.replace_all(&result, "FLOAT").to_string();
-
-        // BOOLEAN → TINYINT(1)
-        result = RE_BOOLEAN.replace_all(&result, "TINYINT(1)").to_string();
-
-        // TIMESTAMPTZ → DATETIME
-        result = RE_TIMESTAMPTZ.replace_all(&result, "DATETIME").to_string();
-
-        // TIMESTAMP WITH TIME ZONE → DATETIME
-        result = RE_TIMESTAMP_WITH_TZ
-            .replace_all(&result, "DATETIME")
-            .to_string();
-
-        // TIMESTAMP WITHOUT TIME ZONE → DATETIME
-        result = RE_TIMESTAMP_NO_TZ
-            .replace_all(&result, "DATETIME")
-            .to_string();
-
-        // JSONB → JSON
-        result = RE_JSONB.replace_all(&result, "JSON").to_string();
-
-        // UUID → VARCHAR(36)
-        result = RE_UUID.replace_all(&result, "VARCHAR(36)").to_string();
-
-        result
-    }
-
-    /// Convert PostgreSQL types to SQLite
-    fn postgres_to_sqlite(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // SERIAL → INTEGER (SQLite auto-increments INTEGER PRIMARY KEY)
-        result = RE_BIGSERIAL.replace_all(&result, "INTEGER").to_string();
-        result = RE_SERIAL.replace_all(&result, "INTEGER").to_string();
-        result = RE_SMALLSERIAL.replace_all(&result, "INTEGER").to_string();
-
-        // BYTEA → BLOB
-        result = RE_BYTEA.replace_all(&result, "BLOB").to_string();
-
-        // DOUBLE PRECISION → REAL
-        result = RE_DOUBLE_PRECISION.replace_all(&result, "REAL").to_string();
-
-        // BOOLEAN → INTEGER
-        result = RE_BOOLEAN.replace_all(&result, "INTEGER").to_string();
-
-        // Timestamps → TEXT
-        result = RE_TIMESTAMPTZ.replace_all(&result, "TEXT").to_string();
-        result = RE_TIMESTAMP_WITH_TZ
-            .replace_all(&result, "TEXT")
-            .to_string();
-        result = RE_TIMESTAMP_NO_TZ.replace_all(&result, "TEXT").to_string();
-
-        // JSONB/JSON → TEXT
-        result = RE_JSONB.replace_all(&result, "TEXT").to_string();
-        result = RE_JSON.replace_all(&result, "TEXT").to_string();
-
-        // UUID → TEXT
-        result = RE_UUID.replace_all(&result, "TEXT").to_string();
-
-        // VARCHAR → TEXT
-        result = RE_VARCHAR.replace_all(&result, "TEXT").to_string();
-
-        result
-    }
-
-    /// Convert SQLite types to MySQL
-    fn sqlite_to_mysql(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // SQLite uses TEXT for everything, but we can preserve some type info
-        // REAL → DOUBLE
-        result = RE_REAL.replace_all(&result, "DOUBLE").to_string();
-
-        // BLOB stays BLOB
-        // TEXT stays TEXT
-        // INTEGER stays INTEGER (MySQL will handle it)
-
-        result
-    }
-
-    /// Convert SQLite types to PostgreSQL
-    fn sqlite_to_postgres(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // REAL → DOUBLE PRECISION
-        result = RE_REAL.replace_all(&result, "DOUBLE PRECISION").to_string();
-
-        // BLOB → BYTEA
-        result = RE_BLOB.replace_all(&result, "BYTEA").to_string();
-
-        // INTEGER stays INTEGER
-        // TEXT stays TEXT
-
-        result
-    }
-
-    /// Convert MySQL types to MSSQL
-    fn mysql_to_mssql(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // AUTO_INCREMENT → IDENTITY(1,1) (handled elsewhere in convert_auto_increment)
-
-        // Integer types - strip display width
-        result = RE_TINYINT_BOOL.replace_all(&result, "BIT").to_string();
-        result = RE_TINYINT.replace_all(&result, "TINYINT").to_string();
-        result = RE_SMALLINT.replace_all(&result, "SMALLINT").to_string();
-        result = RE_MEDIUMINT.replace_all(&result, "INT").to_string();
-        result = RE_INT_SIZE.replace_all(&result, "INT").to_string();
-        result = RE_BIGINT_SIZE.replace_all(&result, "BIGINT").to_string();
-
-        // Float types
-        result = RE_DOUBLE.replace_all(&result, "FLOAT").to_string();
-        result = RE_FLOAT.replace_all(&result, "REAL").to_string();
-
-        // Text types
-        result = RE_LONGTEXT
-            .replace_all(&result, "NVARCHAR(MAX)")
-            .to_string();
-        result = RE_MEDIUMTEXT
-            .replace_all(&result, "NVARCHAR(MAX)")
-            .to_string();
-        result = RE_TINYTEXT
-            .replace_all(&result, "NVARCHAR(255)")
-            .to_string();
-
-        // Binary types
-        result = RE_LONGBLOB
-            .replace_all(&result, "VARBINARY(MAX)")
-            .to_string();
-        result = RE_MEDIUMBLOB
-            .replace_all(&result, "VARBINARY(MAX)")
-            .to_string();
-        result = RE_TINYBLOB
-            .replace_all(&result, "VARBINARY(255)")
-            .to_string();
-        result = RE_BLOB.replace_all(&result, "VARBINARY(MAX)").to_string();
-
-        // Date/time types
-        result = RE_DATETIME.replace_all(&result, "DATETIME2").to_string();
-
-        // JSON → NVARCHAR(MAX)
-        result = RE_JSON.replace_all(&result, "NVARCHAR(MAX)").to_string();
-
-        // ENUM → NVARCHAR(255)
-        result = RE_ENUM.replace_all(&result, "NVARCHAR(255)").to_string();
-
-        // SET → NVARCHAR(255)
-        result = RE_SET.replace_all(&result, "NVARCHAR(255)").to_string();
-
-        // UNSIGNED - remove
-        result = RE_UNSIGNED.replace_all(&result, "").to_string();
-
-        // ZEROFILL - remove
-        result = RE_ZEROFILL.replace_all(&result, "").to_string();
-
-        result
-    }
-
-    /// Convert PostgreSQL types to MSSQL
-    fn postgres_to_mssql(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // SERIAL → INT IDENTITY(1,1)
-        result = RE_BIGSERIAL
-            .replace_all(&result, "BIGINT IDENTITY(1,1)")
-            .to_string();
-        result = RE_SERIAL
-            .replace_all(&result, "INT IDENTITY(1,1)")
-            .to_string();
-        result = RE_SMALLSERIAL
-            .replace_all(&result, "SMALLINT IDENTITY(1,1)")
-            .to_string();
-
-        // BYTEA → VARBINARY(MAX)
-        result = RE_BYTEA.replace_all(&result, "VARBINARY(MAX)").to_string();
-
-        // DOUBLE PRECISION → FLOAT
-        result = RE_DOUBLE_PRECISION
-            .replace_all(&result, "FLOAT")
-            .to_string();
-
-        // REAL stays REAL
-
-        // BOOLEAN → BIT
-        result = RE_BOOLEAN.replace_all(&result, "BIT").to_string();
-
-        // TIMESTAMPTZ → DATETIMEOFFSET
-        result = RE_TIMESTAMPTZ
-            .replace_all(&result, "DATETIMEOFFSET")
-            .to_string();
-
-        // TIMESTAMP WITH TIME ZONE → DATETIMEOFFSET
-        result = RE_TIMESTAMP_WITH_TZ
-            .replace_all(&result, "DATETIMEOFFSET")
-            .to_string();
-
-        // TIMESTAMP WITHOUT TIME ZONE → DATETIME2
-        result = RE_TIMESTAMP_NO_TZ
-            .replace_all(&result, "DATETIME2")
-            .to_string();
-
-        // JSONB → NVARCHAR(MAX)
-        result = RE_JSONB.replace_all(&result, "NVARCHAR(MAX)").to_string();
-
-        // JSON → NVARCHAR(MAX)
-        result = RE_JSON.replace_all(&result, "NVARCHAR(MAX)").to_string();
-
-        // UUID → UNIQUEIDENTIFIER
-        result = RE_UUID.replace_all(&result, "UNIQUEIDENTIFIER").to_string();
-
-        // TEXT → NVARCHAR(MAX)
-        result = RE_TEXT.replace_all(&result, "NVARCHAR(MAX)").to_string();
-
-        result
-    }
-
-    /// Convert SQLite types to MSSQL
-    fn sqlite_to_mssql(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // REAL → FLOAT
-        result = RE_REAL.replace_all(&result, "FLOAT").to_string();
-
-        // BLOB → VARBINARY(MAX)
-        result = RE_BLOB.replace_all(&result, "VARBINARY(MAX)").to_string();
-
-        // TEXT → NVARCHAR(MAX)
-        result = RE_TEXT.replace_all(&result, "NVARCHAR(MAX)").to_string();
-
-        result
-    }
-
-    /// Convert MSSQL types to MySQL
-    fn mssql_to_mysql(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // IDENTITY → AUTO_INCREMENT (handled elsewhere)
-
-        // BIT → TINYINT(1)
-        result = RE_BIT.replace_all(&result, "TINYINT(1)").to_string();
-
-        // NVARCHAR(MAX) → LONGTEXT
-        result = RE_NVARCHAR_MAX.replace_all(&result, "LONGTEXT").to_string();
-
-        // NVARCHAR(n) → VARCHAR(n)
-        result = RE_NVARCHAR.replace_all(&result, "VARCHAR$1").to_string();
-
-        // NCHAR(n) → CHAR(n)
-        result = RE_NCHAR.replace_all(&result, "CHAR$1").to_string();
-
-        // NTEXT → LONGTEXT
-        result = RE_NTEXT.replace_all(&result, "LONGTEXT").to_string();
-
-        // VARCHAR(MAX) → LONGTEXT
-        result = RE_VARCHAR_MAX.replace_all(&result, "LONGTEXT").to_string();
-
-        // VARBINARY(MAX) → LONGBLOB
-        result = RE_VARBINARY_MAX
-            .replace_all(&result, "LONGBLOB")
-            .to_string();
-
-        // IMAGE → LONGBLOB
-        result = RE_IMAGE.replace_all(&result, "LONGBLOB").to_string();
-
-        // DATETIME2 → DATETIME(6)
-        result = RE_DATETIME2.replace_all(&result, "DATETIME(6)").to_string();
-
-        // DATETIMEOFFSET → DATETIME
-        result = RE_DATETIMEOFFSET
-            .replace_all(&result, "DATETIME")
-            .to_string();
-
-        // SMALLDATETIME → DATETIME
-        result = RE_SMALLDATETIME
-            .replace_all(&result, "DATETIME")
-            .to_string();
-
-        // MONEY → DECIMAL(19,4)
-        result = RE_MONEY.replace_all(&result, "DECIMAL(19,4)").to_string();
-
-        // SMALLMONEY → DECIMAL(10,4)
-        result = RE_SMALLMONEY
-            .replace_all(&result, "DECIMAL(10,4)")
-            .to_string();
-
-        // UNIQUEIDENTIFIER → VARCHAR(36)
-        result = RE_UNIQUEIDENTIFIER
-            .replace_all(&result, "VARCHAR(36)")
-            .to_string();
-
-        // XML → LONGTEXT
-        result = RE_XML.replace_all(&result, "LONGTEXT").to_string();
-
-        // ROWVERSION/MSSQL TIMESTAMP → BINARY(8)
-        result = RE_MSSQL_TIMESTAMP_BRACKETED
-            .replace_all(&result, "BINARY(8)")
-            .to_string();
-        result = RE_ROWVERSION_ONLY
-            .replace_all(&result, "BINARY(8)")
-            .to_string();
-
-        // Strip MSSQL-specific clauses
-        result = RE_ON_PRIMARY.replace_all(&result, "").to_string();
-        result = RE_CLUSTERED.replace_all(&result, "").to_string();
-        result = RE_NONCLUSTERED.replace_all(&result, "").to_string();
-
-        result
-    }
-
-    /// Convert MSSQL types to PostgreSQL
-    fn mssql_to_postgres(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // IDENTITY → SERIAL (handled elsewhere)
-
-        // IMPORTANT: Handle ROWVERSION first (before any TIMESTAMP conversion)
-        // In MSSQL, TIMESTAMP is an alias for ROWVERSION (a binary type, not datetime!)
-        // Use a more specific regex that matches MSSQL TIMESTAMP but not PostgreSQL TIMESTAMP
-        result = RE_MSSQL_TIMESTAMP_BRACKETED
-            .replace_all(&result, "BYTEA")
-            .to_string();
-        result = RE_ROWVERSION_ONLY.replace_all(&result, "BYTEA").to_string();
-
-        // BIT → BOOLEAN
-        result = RE_BIT.replace_all(&result, "BOOLEAN").to_string();
-
-        // NVARCHAR(MAX) → TEXT
-        result = RE_NVARCHAR_MAX.replace_all(&result, "TEXT").to_string();
-
-        // NVARCHAR(n) → VARCHAR(n)
-        result = RE_NVARCHAR.replace_all(&result, "VARCHAR$1").to_string();
-
-        // NCHAR(n) → CHAR(n)
-        result = RE_NCHAR.replace_all(&result, "CHAR$1").to_string();
-
-        // NTEXT → TEXT
-        result = RE_NTEXT.replace_all(&result, "TEXT").to_string();
-
-        // VARCHAR(MAX) → TEXT
-        result = RE_VARCHAR_MAX.replace_all(&result, "TEXT").to_string();
-
-        // VARBINARY(MAX) → BYTEA
-        result = RE_VARBINARY_MAX.replace_all(&result, "BYTEA").to_string();
-
-        // VARBINARY(n) → BYTEA
-        result = RE_VARBINARY.replace_all(&result, "BYTEA").to_string();
-
-        // IMAGE → BYTEA
-        result = RE_IMAGE.replace_all(&result, "BYTEA").to_string();
-
-        // DATETIME2 → TIMESTAMP
-        result = RE_DATETIME2.replace_all(&result, "TIMESTAMP").to_string();
-
-        // DATETIME → TIMESTAMP (but not MSSQL TIMESTAMP which is already converted)
-        result = RE_DATETIME.replace_all(&result, "TIMESTAMP").to_string();
-
-        // DATETIMEOFFSET → TIMESTAMPTZ
-        result = RE_DATETIMEOFFSET
-            .replace_all(&result, "TIMESTAMPTZ")
-            .to_string();
-
-        // SMALLDATETIME → TIMESTAMP
-        result = RE_SMALLDATETIME
-            .replace_all(&result, "TIMESTAMP")
-            .to_string();
-
-        // MONEY → DECIMAL(19,4)
-        result = RE_MONEY.replace_all(&result, "DECIMAL(19,4)").to_string();
-
-        // SMALLMONEY → DECIMAL(10,4)
-        result = RE_SMALLMONEY
-            .replace_all(&result, "DECIMAL(10,4)")
-            .to_string();
-
-        // UNIQUEIDENTIFIER → UUID
-        result = RE_UNIQUEIDENTIFIER.replace_all(&result, "UUID").to_string();
-
-        // XML → XML (PostgreSQL supports XML type)
-
-        // FLOAT → DOUBLE PRECISION
-        result = RE_FLOAT
-            .replace_all(&result, "DOUBLE PRECISION")
-            .to_string();
-
-        // Strip MSSQL-specific clauses
-        result = RE_ON_PRIMARY.replace_all(&result, "").to_string();
-        result = RE_CLUSTERED.replace_all(&result, "").to_string();
-        result = RE_NONCLUSTERED.replace_all(&result, "").to_string();
-
-        result
-    }
-
-    /// Convert MSSQL types to SQLite
-    fn mssql_to_sqlite(stmt: &str) -> String {
-        let mut result = stmt.to_string();
-
-        // BIT → INTEGER
-        result = RE_BIT.replace_all(&result, "INTEGER").to_string();
-
-        // NVARCHAR → TEXT
-        result = RE_NVARCHAR_MAX.replace_all(&result, "TEXT").to_string();
-        result = RE_NVARCHAR.replace_all(&result, "TEXT").to_string();
-
-        // NCHAR → TEXT
-        result = RE_NCHAR.replace_all(&result, "TEXT").to_string();
-
-        // NTEXT → TEXT
-        result = RE_NTEXT.replace_all(&result, "TEXT").to_string();
-
-        // VARCHAR(MAX) → TEXT
-        result = RE_VARCHAR_MAX.replace_all(&result, "TEXT").to_string();
-
-        // VARBINARY → BLOB
-        result = RE_VARBINARY_MAX.replace_all(&result, "BLOB").to_string();
-        result = RE_VARBINARY.replace_all(&result, "BLOB").to_string();
-
-        // IMAGE → BLOB
-        result = RE_IMAGE.replace_all(&result, "BLOB").to_string();
-
-        // Date/time → TEXT
-        result = RE_DATETIME2.replace_all(&result, "TEXT").to_string();
-        result = RE_DATETIME.replace_all(&result, "TEXT").to_string();
-        result = RE_DATETIMEOFFSET.replace_all(&result, "TEXT").to_string();
-        result = RE_SMALLDATETIME.replace_all(&result, "TEXT").to_string();
-
-        // MONEY → REAL
-        result = RE_MONEY.replace_all(&result, "REAL").to_string();
-        result = RE_SMALLMONEY.replace_all(&result, "REAL").to_string();
-
-        // UNIQUEIDENTIFIER → TEXT
-        result = RE_UNIQUEIDENTIFIER.replace_all(&result, "TEXT").to_string();
-
-        // XML → TEXT
-        result = RE_XML.replace_all(&result, "TEXT").to_string();
-
-        // ROWVERSION/MSSQL TIMESTAMP → BLOB
-        result = RE_MSSQL_TIMESTAMP_BRACKETED
-            .replace_all(&result, "BLOB")
-            .to_string();
-        result = RE_ROWVERSION_ONLY.replace_all(&result, "BLOB").to_string();
-
-        // FLOAT → REAL
-        result = RE_FLOAT.replace_all(&result, "REAL").to_string();
-
-        // Strip MSSQL-specific clauses
-        result = RE_ON_PRIMARY.replace_all(&result, "").to_string();
-        result = RE_CLUSTERED.replace_all(&result, "").to_string();
-        result = RE_NONCLUSTERED.replace_all(&result, "").to_string();
-
-        result
-    }
 }
+
+/// One ordered rewrite table: each regex is applied to the output of the
+/// previous one, so order within a table is load-bearing.
+type Rules = &'static [(&'static Lazy<Regex>, &'static str)];
+
+/// Apply `rules` in order. Borrows `stmt` until a rule actually matches, so a
+/// statement that no rule touches costs one allocation, not one per rule.
+fn apply(rules: Rules, stmt: &str) -> String {
+    let mut result = Cow::Borrowed(stmt);
+    for (re, rep) in rules {
+        if let Cow::Owned(s) = re.replace_all(&result, *rep) {
+            result = Cow::Owned(s);
+        }
+    }
+    result.into_owned()
+}
+
+/// MySQL → PostgreSQL. Integer display widths are stripped; UNSIGNED/ZEROFILL dropped.
+static MYSQL_TO_POSTGRES: Rules = &[
+    (&RE_TINYINT_BOOL, "BOOLEAN"),
+    (&RE_TINYINT, "SMALLINT"),
+    (&RE_SMALLINT, "SMALLINT"),
+    (&RE_MEDIUMINT, "INTEGER"),
+    (&RE_INT_SIZE, "INTEGER"),
+    (&RE_BIGINT_SIZE, "BIGINT"),
+    (&RE_DOUBLE, "DOUBLE PRECISION"),
+    (&RE_FLOAT, "REAL"),
+    (&RE_LONGTEXT, "TEXT"),
+    (&RE_MEDIUMTEXT, "TEXT"),
+    (&RE_TINYTEXT, "TEXT"),
+    (&RE_LONGBLOB, "BYTEA"),
+    (&RE_MEDIUMBLOB, "BYTEA"),
+    (&RE_TINYBLOB, "BYTEA"),
+    (&RE_BLOB, "BYTEA"),
+    (&RE_VARBINARY, "BYTEA"),
+    (&RE_BINARY, "BYTEA"),
+    (&RE_DATETIME, "TIMESTAMP"),
+    (&RE_JSON, "JSONB"),
+    // ENUM/SET → VARCHAR (lossy, warned by map_column_type)
+    (&RE_ENUM, "VARCHAR(255)"),
+    (&RE_SET, "VARCHAR(255)"),
+    (&RE_UNSIGNED, ""),
+    (&RE_ZEROFILL, ""),
+];
+
+/// MySQL → SQLite. SQLite is lenient with types; normalized for consistency.
+static MYSQL_TO_SQLITE: Rules = &[
+    (&RE_TINYINT, "INTEGER"),
+    (&RE_SMALLINT, "INTEGER"),
+    (&RE_MEDIUMINT, "INTEGER"),
+    (&RE_INT_SIZE, "INTEGER"),
+    (&RE_BIGINT_SIZE, "INTEGER"),
+    (&RE_DOUBLE, "REAL"),
+    (&RE_FLOAT, "REAL"),
+    (&RE_DECIMAL, "REAL"),
+    (&RE_LONGTEXT, "TEXT"),
+    (&RE_MEDIUMTEXT, "TEXT"),
+    (&RE_TINYTEXT, "TEXT"),
+    (&RE_VARCHAR, "TEXT"),
+    (&RE_CHAR, "TEXT"),
+    (&RE_LONGBLOB, "BLOB"),
+    (&RE_MEDIUMBLOB, "BLOB"),
+    (&RE_TINYBLOB, "BLOB"),
+    (&RE_VARBINARY, "BLOB"),
+    (&RE_BINARY, "BLOB"),
+    (&RE_DATETIME, "TEXT"),
+    (&RE_TIMESTAMP, "TEXT"),
+    (&RE_DATE, "TEXT"),
+    (&RE_TIME, "TEXT"),
+    (&RE_JSON, "TEXT"),
+    (&RE_ENUM, "TEXT"),
+    (&RE_SET, "TEXT"),
+    (&RE_UNSIGNED, ""),
+    (&RE_ZEROFILL, ""),
+];
+
+/// PostgreSQL → MySQL.
+static POSTGRES_TO_MYSQL: Rules = &[
+    (&RE_BIGSERIAL, "BIGINT AUTO_INCREMENT"),
+    (&RE_SERIAL, "INT AUTO_INCREMENT"),
+    (&RE_SMALLSERIAL, "SMALLINT AUTO_INCREMENT"),
+    (&RE_BYTEA, "LONGBLOB"),
+    (&RE_DOUBLE_PRECISION, "DOUBLE"),
+    (&RE_REAL, "FLOAT"),
+    (&RE_BOOLEAN, "TINYINT(1)"),
+    (&RE_TIMESTAMPTZ, "DATETIME"),
+    (&RE_TIMESTAMP_WITH_TZ, "DATETIME"),
+    (&RE_TIMESTAMP_NO_TZ, "DATETIME"),
+    (&RE_JSONB, "JSON"),
+    (&RE_UUID, "VARCHAR(36)"),
+];
+
+/// PostgreSQL → SQLite. SERIAL → INTEGER (SQLite auto-increments INTEGER PRIMARY KEY).
+static POSTGRES_TO_SQLITE: Rules = &[
+    (&RE_BIGSERIAL, "INTEGER"),
+    (&RE_SERIAL, "INTEGER"),
+    (&RE_SMALLSERIAL, "INTEGER"),
+    (&RE_BYTEA, "BLOB"),
+    (&RE_DOUBLE_PRECISION, "REAL"),
+    (&RE_BOOLEAN, "INTEGER"),
+    (&RE_TIMESTAMPTZ, "TEXT"),
+    (&RE_TIMESTAMP_WITH_TZ, "TEXT"),
+    (&RE_TIMESTAMP_NO_TZ, "TEXT"),
+    (&RE_JSONB, "TEXT"),
+    (&RE_JSON, "TEXT"),
+    (&RE_UUID, "TEXT"),
+    (&RE_VARCHAR, "TEXT"),
+];
+
+/// SQLite → MySQL. BLOB/TEXT/INTEGER pass through.
+static SQLITE_TO_MYSQL: Rules = &[(&RE_REAL, "DOUBLE")];
+
+/// SQLite → PostgreSQL. INTEGER/TEXT pass through.
+static SQLITE_TO_POSTGRES: Rules = &[(&RE_REAL, "DOUBLE PRECISION"), (&RE_BLOB, "BYTEA")];
+
+/// MySQL → MSSQL. AUTO_INCREMENT → IDENTITY is handled in convert_auto_increment.
+static MYSQL_TO_MSSQL: Rules = &[
+    (&RE_TINYINT_BOOL, "BIT"),
+    (&RE_TINYINT, "TINYINT"),
+    (&RE_SMALLINT, "SMALLINT"),
+    (&RE_MEDIUMINT, "INT"),
+    (&RE_INT_SIZE, "INT"),
+    (&RE_BIGINT_SIZE, "BIGINT"),
+    (&RE_DOUBLE, "FLOAT"),
+    (&RE_FLOAT, "REAL"),
+    (&RE_LONGTEXT, "NVARCHAR(MAX)"),
+    (&RE_MEDIUMTEXT, "NVARCHAR(MAX)"),
+    (&RE_TINYTEXT, "NVARCHAR(255)"),
+    (&RE_LONGBLOB, "VARBINARY(MAX)"),
+    (&RE_MEDIUMBLOB, "VARBINARY(MAX)"),
+    (&RE_TINYBLOB, "VARBINARY(255)"),
+    (&RE_BLOB, "VARBINARY(MAX)"),
+    (&RE_DATETIME, "DATETIME2"),
+    (&RE_JSON, "NVARCHAR(MAX)"),
+    (&RE_ENUM, "NVARCHAR(255)"),
+    (&RE_SET, "NVARCHAR(255)"),
+    (&RE_UNSIGNED, ""),
+    (&RE_ZEROFILL, ""),
+];
+
+/// PostgreSQL → MSSQL. REAL passes through.
+static POSTGRES_TO_MSSQL: Rules = &[
+    (&RE_BIGSERIAL, "BIGINT IDENTITY(1,1)"),
+    (&RE_SERIAL, "INT IDENTITY(1,1)"),
+    (&RE_SMALLSERIAL, "SMALLINT IDENTITY(1,1)"),
+    (&RE_BYTEA, "VARBINARY(MAX)"),
+    (&RE_DOUBLE_PRECISION, "FLOAT"),
+    (&RE_BOOLEAN, "BIT"),
+    (&RE_TIMESTAMPTZ, "DATETIMEOFFSET"),
+    (&RE_TIMESTAMP_WITH_TZ, "DATETIMEOFFSET"),
+    (&RE_TIMESTAMP_NO_TZ, "DATETIME2"),
+    (&RE_JSONB, "NVARCHAR(MAX)"),
+    (&RE_JSON, "NVARCHAR(MAX)"),
+    (&RE_UUID, "UNIQUEIDENTIFIER"),
+    (&RE_TEXT, "NVARCHAR(MAX)"),
+];
+
+/// SQLite → MSSQL.
+static SQLITE_TO_MSSQL: Rules = &[
+    (&RE_REAL, "FLOAT"),
+    (&RE_BLOB, "VARBINARY(MAX)"),
+    (&RE_TEXT, "NVARCHAR(MAX)"),
+];
+
+/// MSSQL → MySQL. IDENTITY → AUTO_INCREMENT is handled elsewhere.
+static MSSQL_TO_MYSQL: Rules = &[
+    (&RE_BIT, "TINYINT(1)"),
+    (&RE_NVARCHAR_MAX, "LONGTEXT"),
+    (&RE_NVARCHAR, "VARCHAR$1"),
+    (&RE_NCHAR, "CHAR$1"),
+    (&RE_NTEXT, "LONGTEXT"),
+    (&RE_VARCHAR_MAX, "LONGTEXT"),
+    (&RE_VARBINARY_MAX, "LONGBLOB"),
+    (&RE_IMAGE, "LONGBLOB"),
+    (&RE_DATETIME2, "DATETIME(6)"),
+    (&RE_DATETIMEOFFSET, "DATETIME"),
+    (&RE_SMALLDATETIME, "DATETIME"),
+    (&RE_MONEY, "DECIMAL(19,4)"),
+    (&RE_SMALLMONEY, "DECIMAL(10,4)"),
+    (&RE_UNIQUEIDENTIFIER, "VARCHAR(36)"),
+    (&RE_XML, "LONGTEXT"),
+    // ROWVERSION / MSSQL TIMESTAMP → BINARY(8)
+    (&RE_MSSQL_TIMESTAMP_BRACKETED, "BINARY(8)"),
+    (&RE_ROWVERSION_ONLY, "BINARY(8)"),
+    // Strip MSSQL-specific clauses
+    (&RE_ON_PRIMARY, ""),
+    (&RE_CLUSTERED, ""),
+    (&RE_NONCLUSTERED, ""),
+];
+
+/// MSSQL → PostgreSQL. IDENTITY → SERIAL is handled elsewhere; XML passes through.
+///
+/// ROWVERSION comes first: in MSSQL, TIMESTAMP is an alias for ROWVERSION (a
+/// binary type, not a datetime), so it must be rewritten before any
+/// DATETIME → TIMESTAMP rule produces a PostgreSQL TIMESTAMP.
+static MSSQL_TO_POSTGRES: Rules = &[
+    (&RE_MSSQL_TIMESTAMP_BRACKETED, "BYTEA"),
+    (&RE_ROWVERSION_ONLY, "BYTEA"),
+    (&RE_BIT, "BOOLEAN"),
+    (&RE_NVARCHAR_MAX, "TEXT"),
+    (&RE_NVARCHAR, "VARCHAR$1"),
+    (&RE_NCHAR, "CHAR$1"),
+    (&RE_NTEXT, "TEXT"),
+    (&RE_VARCHAR_MAX, "TEXT"),
+    (&RE_VARBINARY_MAX, "BYTEA"),
+    (&RE_VARBINARY, "BYTEA"),
+    (&RE_IMAGE, "BYTEA"),
+    (&RE_DATETIME2, "TIMESTAMP"),
+    (&RE_DATETIME, "TIMESTAMP"),
+    (&RE_DATETIMEOFFSET, "TIMESTAMPTZ"),
+    (&RE_SMALLDATETIME, "TIMESTAMP"),
+    (&RE_MONEY, "DECIMAL(19,4)"),
+    (&RE_SMALLMONEY, "DECIMAL(10,4)"),
+    (&RE_UNIQUEIDENTIFIER, "UUID"),
+    (&RE_FLOAT, "DOUBLE PRECISION"),
+    (&RE_ON_PRIMARY, ""),
+    (&RE_CLUSTERED, ""),
+    (&RE_NONCLUSTERED, ""),
+];
+
+/// MSSQL → SQLite.
+static MSSQL_TO_SQLITE: Rules = &[
+    (&RE_BIT, "INTEGER"),
+    (&RE_NVARCHAR_MAX, "TEXT"),
+    (&RE_NVARCHAR, "TEXT"),
+    (&RE_NCHAR, "TEXT"),
+    (&RE_NTEXT, "TEXT"),
+    (&RE_VARCHAR_MAX, "TEXT"),
+    (&RE_VARBINARY_MAX, "BLOB"),
+    (&RE_VARBINARY, "BLOB"),
+    (&RE_IMAGE, "BLOB"),
+    (&RE_DATETIME2, "TEXT"),
+    (&RE_DATETIME, "TEXT"),
+    (&RE_DATETIMEOFFSET, "TEXT"),
+    (&RE_SMALLDATETIME, "TEXT"),
+    (&RE_MONEY, "REAL"),
+    (&RE_SMALLMONEY, "REAL"),
+    (&RE_UNIQUEIDENTIFIER, "TEXT"),
+    (&RE_XML, "TEXT"),
+    (&RE_MSSQL_TIMESTAMP_BRACKETED, "BLOB"),
+    (&RE_ROWVERSION_ONLY, "BLOB"),
+    (&RE_FLOAT, "REAL"),
+    (&RE_ON_PRIMARY, ""),
+    (&RE_CLUSTERED, ""),
+    (&RE_NONCLUSTERED, ""),
+];
 
 // Pre-compiled regexes for type matching
 static RE_TINYINT_BOOL: Lazy<Regex> =

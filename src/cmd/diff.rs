@@ -1,4 +1,4 @@
-use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, LIMITS, MODE, OUTPUT_FORMAT};
+use super::common::{comma_list, BEHAVIOR, FILTERING, INPUT_OUTPUT, LIMITS, MODE, OUTPUT_FORMAT};
 use crate::differ::{format_diff, DiffConfig, DiffOutputFormat, Differ};
 use clap::{Args, ValueHint};
 use std::collections::HashMap;
@@ -124,12 +124,8 @@ pub fn run(args: DiffArgs) -> anyhow::Result<()> {
     let resolved_dialect = super::common::resolve_dialect(&old_file, dialect.as_deref(), false)?;
 
     // Parse table filters
-    let tables_filter: Vec<String> = tables
-        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
-    let exclude_filter: Vec<String> = exclude
-        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
+    let tables_filter: Vec<String> = tables.as_deref().map(comma_list).unwrap_or_default();
+    let exclude_filter: Vec<String> = exclude.as_deref().map(comma_list).unwrap_or_default();
 
     // Calculate file sizes for display and progress
     let old_size = std::fs::metadata(&old_file)?.len();
@@ -170,7 +166,8 @@ pub fn run(args: DiffArgs) -> anyhow::Result<()> {
 
     // Parse ignore columns
     let ignore_columns_vec: Vec<String> = ignore_columns
-        .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
+        .as_deref()
+        .map(comma_list)
         .unwrap_or_default();
 
     // Build config

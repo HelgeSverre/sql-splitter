@@ -9,7 +9,7 @@ use ahash::AHashMap;
 use anyhow::Result;
 use duckdb::Connection;
 
-use super::ImportStats;
+use super::{is_missing_table_error, ImportStats};
 
 /// Maximum rows to accumulate per batch before flushing
 pub const MAX_ROWS_PER_BATCH: usize = 10_000;
@@ -188,14 +188,7 @@ fn generate_batch_insert(
 
     // DuckDB loads PostgreSQL's `public` and SQL Server's standard system
     // schemas into its default schema. Match the DDL and direct-INSERT paths.
-    let duckdb_table = match dialect {
-        SqlDialect::Postgres => table.strip_prefix("public.").unwrap_or(table),
-        SqlDialect::Mssql => ["dbo.", "master.", "tempdb.", "model.", "msdb."]
-            .iter()
-            .find_map(|prefix| table.strip_prefix(prefix))
-            .unwrap_or(table),
-        SqlDialect::MySql | SqlDialect::Sqlite => table,
-    };
+    let duckdb_table = duckdb_table_name(table, dialect);
     let mut sql = format!(
         "INSERT INTO {}",
         quote_ident(SqlDialect::Postgres, duckdb_table)
@@ -481,16 +474,6 @@ fn try_batch_insert(
             Err(e.into())
         }
     }
-}
-
-/// FK violations also say that a key "does not exist", so only a catalog
-/// missing-table error can tell the loader to skip future rows for a table.
-fn is_missing_table_error(error: &duckdb::Error) -> bool {
-    matches!(
-        error,
-        duckdb::Error::DuckDBFailure(_, Some(message))
-            if message.starts_with("Catalog Error: Table with name ")
-    )
 }
 
 /// Fallback: retry each row individually via freshly generated single-row

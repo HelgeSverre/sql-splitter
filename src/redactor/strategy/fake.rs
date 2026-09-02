@@ -59,9 +59,7 @@ impl FakeStrategy {
 
             // Address generators
             "address" | "street_address" => {
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
+                let mut fake_rng = seeded(rng);
                 let street: String = StreetName().fake_with_rng(&mut fake_rng);
                 let city: String = CityName().fake_with_rng(&mut fake_rng);
                 let state: String = StateName().fake_with_rng(&mut fake_rng);
@@ -86,8 +84,7 @@ impl FakeStrategy {
                 // that redacts a `country` column before another random
                 // column — preserve the draw to keep the shared stream in
                 // lockstep with the pre-refactor implementation.
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
+                let _ = seeded(rng);
                 "United States".to_string()
             }
 
@@ -106,9 +103,7 @@ impl FakeStrategy {
 
             // Identifier generators
             "uuid" => {
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
+                let mut fake_rng = seeded(rng);
                 format!(
                     "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
                     fake_rng.random::<u32>(),
@@ -121,18 +116,14 @@ impl FakeStrategy {
 
             // Date/time generators
             "date" => {
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
+                let mut fake_rng = seeded(rng);
                 let year = fake_rng.random_range(1970..2024);
                 let month = fake_rng.random_range(1..=12);
                 let day = fake_rng.random_range(1..=28);
                 format!("{:04}-{:02}-{:02}", year, month, day)
             }
             "datetime" | "date_time" => {
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
+                let mut fake_rng = seeded(rng);
                 let year = fake_rng.random_range(1970..2024);
                 let month = fake_rng.random_range(1..=12);
                 let day = fake_rng.random_range(1..=28);
@@ -145,9 +136,7 @@ impl FakeStrategy {
                 )
             }
             "time" => {
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
+                let mut fake_rng = seeded(rng);
                 let hour = fake_rng.random_range(0..24);
                 let minute = fake_rng.random_range(0..60);
                 let second = fake_rng.random_range(0..60);
@@ -157,9 +146,7 @@ impl FakeStrategy {
             // Financial generators
             "credit_card" => {
                 // Generate a fake credit card number (Luhn-valid would be complex, simplified)
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
+                let mut fake_rng = seeded(rng);
                 format!(
                     "{:04}-{:04}-{:04}-{:04}",
                     fake_rng.random_range(1000..9999),
@@ -170,9 +157,7 @@ impl FakeStrategy {
             }
             "iban" => {
                 // Simplified IBAN (not valid, but looks realistic)
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
+                let mut fake_rng = seeded(rng);
                 format!(
                     "DE{:02}{:04}{:04}{:04}{:04}{:02}",
                     fake_rng.random_range(10..99),
@@ -186,9 +171,7 @@ impl FakeStrategy {
 
             // SSN generator
             "ssn" => {
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
+                let mut fake_rng = seeded(rng);
                 format!(
                     "{:03}-{:02}-{:04}",
                     fake_rng.random_range(100..999),
@@ -206,13 +189,19 @@ impl FakeStrategy {
 
             // Default: return a generic fake string
             _ => {
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                let mut fake_rng = rand::rngs::StdRng::from_seed(seed);
+                let mut fake_rng = seeded(rng);
                 format!("FAKE_{}", fake_rng.random_range(10000..99999))
             }
         }
     }
+}
+
+/// Draw one 32-byte block from `rng` and seed a private generator with it.
+/// Every `generate` arm calls this exactly once (see its doc comment).
+fn seeded(rng: &mut dyn rand::Rng) -> StdRng {
+    let mut seed = [0u8; 32];
+    rng.fill_bytes(&mut seed);
+    StdRng::from_seed(seed)
 }
 
 impl Strategy for FakeStrategy {
@@ -230,6 +219,7 @@ impl Strategy for FakeStrategy {
     }
 }
 
+use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
 #[cfg(test)]

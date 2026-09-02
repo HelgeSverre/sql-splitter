@@ -8,44 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-/// How to handle global/lookup tables during sharding
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GlobalTableMode {
-    /// Exclude global tables from output
-    None,
-    /// Include lookup tables in full (default)
-    #[default]
-    Lookups,
-    /// Include all global tables in full
-    All,
-}
-
-impl std::str::FromStr for GlobalTableMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "none" => Ok(GlobalTableMode::None),
-            "lookups" => Ok(GlobalTableMode::Lookups),
-            "all" => Ok(GlobalTableMode::All),
-            _ => Err(format!(
-                "Unknown global mode: {}. Valid options: none, lookups, all",
-                s
-            )),
-        }
-    }
-}
-
-impl std::fmt::Display for GlobalTableMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GlobalTableMode::None => write!(f, "none"),
-            GlobalTableMode::Lookups => write!(f, "lookups"),
-            GlobalTableMode::All => write!(f, "all"),
-        }
-    }
-}
+pub use crate::transform_common::GlobalTableMode;
 
 /// Table classification for sharding behavior
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -171,58 +134,14 @@ impl DefaultShardClassifier {
         "workspace_id",
     ];
 
-    /// Well-known system table patterns
-    pub const SYSTEM_PATTERNS: &'static [&'static str] = &[
-        "migrations",
-        "failed_jobs",
-        "job_batches",
-        "jobs",
-        "cache",
-        "cache_locks",
-        "sessions",
-        "password_reset_tokens",
-        "personal_access_tokens",
-        "telescope_entries",
-        "telescope_entries_tags",
-        "telescope_monitoring",
-        "pulse_",
-        "horizon_",
-    ];
-
-    /// Well-known lookup/global table patterns
-    pub const LOOKUP_PATTERNS: &'static [&'static str] = &[
-        "countries",
-        "states",
-        "provinces",
-        "cities",
-        "currencies",
-        "languages",
-        "timezones",
-        "permissions",
-        "roles",
-        "settings",
-    ];
-
     /// Check if a table name matches system table patterns
     pub fn is_system_table(table_name: &str) -> bool {
-        let lower = table_name.to_lowercase();
-        for pattern in Self::SYSTEM_PATTERNS {
-            if lower.starts_with(pattern) || lower == *pattern {
-                return true;
-            }
-        }
-        false
+        crate::transform_common::is_system_table(table_name)
     }
 
     /// Check if a table name matches lookup table patterns
     pub fn is_lookup_table(table_name: &str) -> bool {
-        let lower = table_name.to_lowercase();
-        for pattern in Self::LOOKUP_PATTERNS {
-            if lower == *pattern {
-                return true;
-            }
-        }
-        false
+        crate::transform_common::is_lookup_table(table_name)
     }
 
     /// Detect junction table by name pattern

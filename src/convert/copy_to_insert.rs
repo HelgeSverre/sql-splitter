@@ -9,7 +9,10 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::parser::postgres_copy::decode_copy_escapes;
+use crate::parser::strip_leading_comments_and_whitespace;
 use crate::parser::SqlDialect;
+use crate::render::sql_string::SqlString;
 use crate::transform_common::quote_identifier;
 
 /// Maximum rows per INSERT statement (for readability and transaction size).
@@ -34,7 +37,7 @@ pub struct CopyHeader {
 /// Input: "COPY schema.table (col1, col2) FROM stdin;"
 pub fn parse_copy_header(stmt: &str) -> Option<CopyHeader> {
     // Strip comments from the beginning
-    let stmt = strip_leading_comments(stmt);
+    let stmt = String::from_utf8_lossy(strip_leading_comments_and_whitespace(stmt.as_bytes()));
 
     static RE_COPY: Lazy<Regex> = Lazy::new(|| {
         // Pattern: COPY [ONLY] [schema.]table [(columns)] FROM stdin
@@ -63,31 +66,6 @@ pub fn parse_copy_header(stmt: &str) -> Option<CopyHeader> {
         table,
         columns,
     })
-}
-
-/// Strip leading SQL comments from a string
-fn strip_leading_comments(stmt: &str) -> String {
-    let mut result = stmt.trim();
-    loop {
-        if result.starts_with("--") {
-            if let Some(pos) = result.find('\n') {
-                result = result[pos + 1..].trim();
-                continue;
-            } else {
-                return String::new();
-            }
-        }
-        if result.starts_with("/*") {
-            if let Some(pos) = result.find("*/") {
-                result = result[pos + 2..].trim();
-                continue;
-            } else {
-                return String::new();
-            }
-        }
-        break;
-    }
-    result.to_string()
 }
 
 /// Convert a COPY data block to INSERT statements
@@ -250,107 +228,13 @@ fn parse_value(value: &[u8]) -> CopyValue {
     }
 
     // Decode escape sequences
-    let decoded = decode_escapes(value);
-    CopyValue::Text(decoded)
-}
-
-/// Decode PostgreSQL COPY escape sequences
-fn decode_escapes(value: &[u8]) -> String {
-    let mut result = String::with_capacity(value.len());
-    let mut i = 0;
-
-    while i < value.len() {
-        if value[i] == b'\\' && i + 1 < value.len() {
-            let next = value[i + 1];
-            let decoded = match next {
-                b'n' => '\n',
-                b'r' => '\r',
-                b't' => '\t',
-                b'\\' => '\\',
-                b'b' => '\x08', // backspace
-                b'f' => '\x0C', // form feed
-                b'v' => '\x0B', // vertical tab
-                _ => {
-                    // Unknown escape or octal, try octal
-                    if next.is_ascii_digit() {
-                        // Try to parse octal (up to 3 digits)
-                        let mut octal_val = 0u8;
-                        let mut consumed = 0;
-                        for j in 0..3 {
-                            if i + 1 + j < value.len() {
-                                let d = value[i + 1 + j];
-                                if (b'0'..=b'7').contains(&d) {
-                                    octal_val = octal_val * 8 + (d - b'0');
-                                    consumed += 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                        if consumed > 0 {
-                            result.push(octal_val as char);
-                            i += 1 + consumed;
-                            continue;
-                        }
-                    }
-                    // Unknown escape, keep as-is
-                    result.push('\\');
-                    result.push(next as char);
-                    i += 2;
-                    continue;
-                }
-            };
-            result.push(decoded);
-            i += 2;
-        } else {
-            // Regular character - handle UTF-8 properly
-            if value[i] < 128 {
-                result.push(value[i] as char);
-                i += 1;
-            } else {
-                // Multi-byte UTF-8 sequence
-                let remaining = &value[i..];
-                if let Ok(s) = std::str::from_utf8(remaining) {
-                    if let Some(c) = s.chars().next() {
-                        result.push(c);
-                        i += c.len_utf8();
-                    } else {
-                        i += 1;
-                    }
-                } else {
-                    // Invalid UTF-8, just push the byte as replacement char
-                    result.push('\u{FFFD}');
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    result
+    CopyValue::Text(String::from_utf8_lossy(&decode_copy_escapes(value)).into_owned())
 }
 
 /// Format a value for SQL INSERT
-fn format_value(value: &CopyValue, dialect: crate::parser::SqlDialect) -> String {
+fn format_value(value: &CopyValue, dialect: SqlDialect) -> String {
     match value {
         CopyValue::Null => "NULL".to_string(),
-        CopyValue::Text(s) => {
-            // Escape quotes based on dialect
-            let escaped = match dialect {
-                crate::parser::SqlDialect::MySql => {
-                    // MySQL: escape with backslash
-                    s.replace('\\', "\\\\")
-                        .replace('\'', "\\'")
-                        .replace('\n', "\\n")
-                        .replace('\r', "\\r")
-                        .replace('\t', "\\t")
-                        .replace('\0', "\\0")
-                }
-                _ => {
-                    // PostgreSQL/SQLite: escape by doubling
-                    s.replace('\'', "''")
-                }
-            };
-            format!("'{}'", escaped)
-        }
+        CopyValue::Text(s) => SqlString::new(dialect, s).to_string(),
     }
 }

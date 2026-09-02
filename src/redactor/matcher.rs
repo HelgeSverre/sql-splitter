@@ -134,72 +134,19 @@ mod tests {
     use super::*;
 
     fn create_test_schema() -> TableSchema {
-        use crate::schema::{Column, ColumnId, ColumnType, TableId};
+        use crate::redactor::test_fixtures::{column, create_test_schema};
+        use crate::schema::ColumnType;
 
-        TableSchema {
-            name: "users".to_string(),
-            id: TableId(0),
-            columns: vec![
-                Column {
-                    name: "id".to_string(),
-                    col_type: ColumnType::Int,
-                    source_type: "INT".to_string(),
-                    ordinal: ColumnId(0),
-                    is_primary_key: true,
-                    is_nullable: false,
-                    is_unique: false,
-                    default_sql: None,
-                    is_generated: false,
-                    is_identity: false,
-                    collation: None,
-                },
-                Column {
-                    name: "email".to_string(),
-                    col_type: ColumnType::Text,
-                    source_type: "VARCHAR(255)".to_string(),
-                    ordinal: ColumnId(1),
-                    is_primary_key: false,
-                    is_nullable: false,
-                    is_unique: false,
-                    default_sql: None,
-                    is_generated: false,
-                    is_identity: false,
-                    collation: None,
-                },
-                Column {
-                    name: "name".to_string(),
-                    col_type: ColumnType::Text,
-                    source_type: "VARCHAR(255)".to_string(),
-                    ordinal: ColumnId(2),
-                    is_primary_key: false,
-                    is_nullable: true,
-                    is_unique: false,
-                    default_sql: None,
-                    is_generated: false,
-                    is_identity: false,
-                    collation: None,
-                },
-                Column {
-                    name: "ssn".to_string(),
-                    col_type: ColumnType::Text,
-                    source_type: "VARCHAR(255)".to_string(),
-                    ordinal: ColumnId(3),
-                    is_primary_key: false,
-                    is_nullable: true,
-                    is_unique: false,
-                    default_sql: None,
-                    is_generated: false,
-                    is_identity: false,
-                    collation: None,
-                },
-            ],
-            primary_key: vec![ColumnId(0)],
-            foreign_keys: vec![],
-            unique_constraints: vec![],
-            check_constraints: vec![],
-            indexes: vec![],
-            create_statement: None,
-        }
+        let mut schema = create_test_schema();
+        schema.columns.push(column(
+            "ssn",
+            ColumnType::Text,
+            "VARCHAR(255)",
+            3,
+            false,
+            true,
+        ));
+        schema
     }
 
     #[test]

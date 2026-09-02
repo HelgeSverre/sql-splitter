@@ -2314,4 +2314,195 @@ mod tests {
 
         assert_eq!(rows, 2);
     }
+
+    fn read_all(sql: &[u8], dialect: SqlDialect) -> Vec<Vec<u8>> {
+        let mut parser = Parser::with_dialect(sql, 8, dialect);
+        let mut out = Vec::new();
+        while let Some(stmt) = parser.read_statement().unwrap() {
+            out.push(stmt);
+        }
+        out
+    }
+
+    #[test]
+    fn regex_fallback_when_quoted_table_name_is_unterminated() {
+        // `extract_table_name_flexible` bails on an unterminated quote; the
+        // flexible regexes still recover a bare name.
+        let cases = [
+            (
+                b"CREATE TABLE \"abc (id int);".as_slice(),
+                StatementType::CreateTable,
+                "abc",
+            ),
+            (
+                b"INSERT INTO \"abc VALUES (1);".as_slice(),
+                StatementType::Insert,
+                "abc",
+            ),
+            // ALTER_TABLE_RE only strips backticks, so the `"` survives here.
+            (
+                b"ALTER TABLE \"abc ADD x int;".as_slice(),
+                StatementType::AlterTable,
+                "\"abc",
+            ),
+            (
+                b"ALTER TABLE `abc ADD x int;".as_slice(),
+                StatementType::AlterTable,
+                "abc",
+            ),
+            (
+                b"DROP TABLE \"abc;".as_slice(),
+                StatementType::DropTable,
+                "abc",
+            ),
+        ];
+        for (stmt, kind, name) in cases {
+            let got = Parser::<&[u8]>::parse_statement_with_dialect(stmt, SqlDialect::MySql);
+            assert_eq!(got, (kind, name.to_string()), "{stmt:?}");
+        }
+        // Nothing after the keyword: both extractors give up.
+        for stmt in [
+            b"CREATE TABLE".as_slice(),
+            b"INSERT INTO".as_slice(),
+            b"ALTER TABLE".as_slice(),
+            b"DROP TABLE".as_slice(),
+        ] {
+            let got = Parser::<&[u8]>::parse_statement_with_dialect(stmt, SqlDialect::MySql);
+            assert_eq!(got, (StatementType::Unknown, String::new()), "{stmt:?}");
+        }
+    }
+
+    #[test]
+    fn with_limits_caps_row_size() {
+        let sql = b"INSERT INTO t VALUES ('0123456789abcdef0123456789abcdef');";
+        let mut parser =
+            Parser::with_dialect(&sql[..], 8, SqlDialect::MySql).with_limits(ParserLimits {
+                max_row: 8,
+                ..ParserLimits::default()
+            });
+        let err = parser
+            .visit_events(|_| Ok(RowFlow::Continue))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds max_row (8 bytes)"), "{err}");
+    }
+
+    #[test]
+    fn lone_star_slash_and_dash_are_ordinary_bytes() {
+        assert_eq!(
+            read_all(b"SELECT /* 2*3 */ 1/2 - 1;", SqlDialect::Postgres),
+            vec![b"SELECT /* 2*3 */ 1/2 - 1;".to_vec()]
+        );
+        assert_eq!(
+            read_all(b"SELECT /* 2*3 */ 1/2 - 1;", SqlDialect::MySql),
+            vec![b"SELECT /* 2*3 */ 1/2 - 1;".to_vec()]
+        );
+    }
+
+    #[test]
+    fn mysql_double_dash_at_eof_is_a_comment() {
+        assert_eq!(
+            read_all(b"SELECT 1 --", SqlDialect::MySql),
+            vec![b"SELECT 1 --".to_vec()]
+        );
+        // `--x` is arithmetic in MySQL, not a comment: the `;` still terminates.
+        assert_eq!(
+            read_all(b"SELECT 1 --x; SELECT 2;", SqlDialect::MySql),
+            vec![b"SELECT 1 --x;".to_vec(), b" SELECT 2;".to_vec()]
+        );
+    }
+
+    #[test]
+    fn multibyte_delimiter_single_semicolon_at_tail_is_literal() {
+        assert_eq!(
+            read_all(b"DELIMITER ;;\nSELECT 1;", SqlDialect::MySql),
+            vec![b"SELECT 1;".to_vec()]
+        );
+        assert_eq!(
+            read_all(b"DELIMITER ;;\nSELECT 1;;SELECT 2;;", SqlDialect::MySql),
+            vec![b"SELECT 1;;".to_vec(), b"SELECT 2;;".to_vec()]
+        );
+    }
+
+    #[test]
+    fn copy_data_without_terminator_is_returned_at_eof() {
+        assert_eq!(
+            read_all(b"COPY t (a) FROM stdin;\n1\n2", SqlDialect::Postgres),
+            vec![b"COPY t (a) FROM stdin;".to_vec(), b"\n1\n2".to_vec()]
+        );
+        // Header at exact EOF: no data block at all.
+        assert_eq!(
+            read_all(b"COPY t (a) FROM stdin;", SqlDialect::Postgres),
+            vec![b"COPY t (a) FROM stdin;".to_vec()]
+        );
+    }
+
+    #[test]
+    fn insert_row_skip_statement_skips_remaining_rows() {
+        let sql = b"INSERT INTO t VALUES (1),(2),(3); SELECT 1;";
+        let mut parser = Parser::with_dialect(&sql[..], 8, SqlDialect::MySql);
+        let mut events = Vec::new();
+        parser
+            .visit_events(|event| match event {
+                ParserEvent::InsertRow { row, .. } => {
+                    events.push(String::from_utf8_lossy(row).into_owned());
+                    Ok(RowFlow::SkipStatement)
+                }
+                ParserEvent::Statement(stmt) => {
+                    events.push(String::from_utf8_lossy(stmt).into_owned());
+                    Ok(RowFlow::Continue)
+                }
+                _ => unreachable!(),
+            })
+            .unwrap();
+        assert_eq!(events, ["(1)", " SELECT 1;"]);
+    }
+
+    #[test]
+    fn copy_header_at_eof_emits_only_copy_start() {
+        let sql = b"COPY t (a) FROM stdin;";
+        let mut parser = Parser::with_dialect(&sql[..], 8, SqlDialect::Postgres);
+        let mut events = Vec::new();
+        parser
+            .visit_events(|event| {
+                events.push(match event {
+                    ParserEvent::CopyStart(_) => "start",
+                    ParserEvent::CopyRow(_) => "row",
+                    ParserEvent::CopyEnd => "end",
+                    ParserEvent::Statement(_) => "statement",
+                    ParserEvent::InsertRow { .. } => "insert",
+                });
+                Ok(RowFlow::Continue)
+            })
+            .unwrap();
+        assert_eq!(events, ["start"]);
+    }
+
+    #[test]
+    fn mssql_comments_strings_and_lone_operator_bytes() {
+        assert_eq!(
+            read_all(
+                b"-- c;\n/* a * b; */ SELECT 1/2 - 1;\nSELECT 'x;y';\nSELECT 'abc",
+                SqlDialect::Mssql
+            ),
+            vec![
+                b"-- c;\n/* a * b; */ SELECT 1/2 - 1;".to_vec(),
+                b"\nSELECT 'x;y';".to_vec(),
+                b"\nSELECT 'abc".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_source_detection_skips_line_and_nested_block_comments() {
+        assert!(has_postgres_copy_stdin_source(
+            b"COPY t -- FROM STDOUT\n FROM STDIN;"
+        ));
+        assert!(has_postgres_copy_stdin_source(
+            b"COPY t /* a /* nested */ b */ FROM STDIN;"
+        ));
+        assert!(!has_postgres_copy_stdin_source(
+            b"COPY t FROM -- STDIN\n STDOUT;"
+        ));
+    }
 }

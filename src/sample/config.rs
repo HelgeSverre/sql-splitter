@@ -7,44 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-/// How to handle global/lookup tables
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GlobalTableMode {
-    /// Exclude global tables
-    None,
-    /// Include lookup tables in full (default)
-    #[default]
-    Lookups,
-    /// Include all global tables in full
-    All,
-}
-
-impl std::str::FromStr for GlobalTableMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "none" => Ok(GlobalTableMode::None),
-            "lookups" => Ok(GlobalTableMode::Lookups),
-            "all" => Ok(GlobalTableMode::All),
-            _ => Err(format!(
-                "Unknown global mode: {}. Valid options: none, lookups, all",
-                s
-            )),
-        }
-    }
-}
-
-impl std::fmt::Display for GlobalTableMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GlobalTableMode::None => write!(f, "none"),
-            GlobalTableMode::Lookups => write!(f, "lookups"),
-            GlobalTableMode::All => write!(f, "all"),
-        }
-    }
-}
+pub use crate::transform_common::GlobalTableMode;
 
 /// Table classification for sampling behavior
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -219,56 +182,14 @@ impl SampleYamlConfig {
 pub struct DefaultClassifier;
 
 impl DefaultClassifier {
-    /// Well-known system table patterns
-    const SYSTEM_PATTERNS: &'static [&'static str] = &[
-        "migrations",
-        "failed_jobs",
-        "job_batches",
-        "jobs",
-        "cache",
-        "cache_locks",
-        "sessions",
-        "password_reset_tokens",
-        "personal_access_tokens",
-        "telescope_entries",
-        "telescope_entries_tags",
-        "telescope_monitoring",
-        "pulse_",
-        "horizon_",
-    ];
-
-    /// Well-known lookup/global table patterns
-    const LOOKUP_PATTERNS: &'static [&'static str] = &[
-        "countries",
-        "states",
-        "provinces",
-        "cities",
-        "currencies",
-        "languages",
-        "timezones",
-        "permissions",
-        "roles",
-        "settings",
-    ];
-
     /// Classify a table using default patterns
     pub fn classify(table_name: &str) -> TableClassification {
-        let lower = table_name.to_lowercase();
-
-        // Check system patterns
-        for pattern in Self::SYSTEM_PATTERNS {
-            if lower.starts_with(pattern) || lower == *pattern {
-                return TableClassification::System;
-            }
+        if crate::transform_common::is_system_table(table_name) {
+            TableClassification::System
+        } else if crate::transform_common::is_lookup_table(table_name) {
+            TableClassification::Lookup
+        } else {
+            TableClassification::Normal
         }
-
-        // Check lookup patterns
-        for pattern in Self::LOOKUP_PATTERNS {
-            if lower == *pattern {
-                return TableClassification::Lookup;
-            }
-        }
-
-        TableClassification::Normal
     }
 }

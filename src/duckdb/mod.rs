@@ -349,6 +349,16 @@ impl Drop for QueryEngine {
 pub const DISK_MODE_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Determine if disk mode should be used based on file size
+/// DuckDB reports FK violations with "does not exist" in the message, so
+/// only a catalog missing-table error may disable later batches for a table.
+pub(crate) fn is_missing_table_error(error: &duckdb::Error) -> bool {
+    matches!(
+        error,
+        duckdb::Error::DuckDBFailure(_, Some(message))
+            if message.starts_with("Catalog Error: Table with name ")
+    )
+}
+
 pub fn should_use_disk_mode(file_size: u64) -> bool {
     file_size > DISK_MODE_THRESHOLD
 }

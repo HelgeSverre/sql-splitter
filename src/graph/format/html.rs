@@ -1,6 +1,6 @@
 //! HTML format output with embedded Mermaid ERD and sql-splitter branding.
 
-use crate::graph::format::mermaid;
+use crate::graph::format::{escape_html, mermaid};
 use crate::graph::view::GraphView;
 
 /// Generate interactive HTML with embedded Mermaid ERD and dark/light mode toggle
@@ -314,13 +314,6 @@ pub fn to_html(view: &GraphView, title: &str) -> String {
     )
 }
 
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 fn escape_js(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('`', "\\`")
@@ -337,31 +330,8 @@ fn indent_mermaid(code: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::view::{ColumnInfo, TableInfo};
-    use ahash::AHashMap;
 
-    fn create_test_view() -> GraphView {
-        let mut tables = AHashMap::new();
-        tables.insert(
-            "users".to_string(),
-            TableInfo {
-                name: "users".to_string(),
-                columns: vec![ColumnInfo {
-                    name: "id".to_string(),
-                    col_type: "INT".to_string(),
-                    is_primary_key: true,
-                    is_foreign_key: false,
-                    is_nullable: false,
-                    references_table: None,
-                    references_column: None,
-                }],
-            },
-        );
-        GraphView {
-            tables,
-            edges: vec![],
-        }
-    }
+    use crate::graph::test_fixtures::create_test_view;
 
     #[test]
     fn test_html_branding() {
@@ -391,8 +361,8 @@ mod tests {
     fn test_html_stats() {
         let view = create_test_view();
         let output = to_html(&view, "Test Schema");
-        assert!(output.contains("1 tables"));
-        assert!(output.contains("1 columns"));
+        assert!(output.contains("2 tables"));
+        assert!(output.contains("4 columns"));
     }
 
     #[test]

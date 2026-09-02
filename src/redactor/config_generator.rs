@@ -267,7 +267,7 @@ fn generate_config_yaml(
 
                 match strategy {
                     StrategyKind::Null => {
-                        yaml.push_str("    strategy: null\n");
+                        yaml.push_str("    strategy: \"null\"\n");
                     }
                     StrategyKind::Constant { value } => {
                         yaml.push_str("    strategy: constant\n");

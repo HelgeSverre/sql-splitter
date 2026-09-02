@@ -362,7 +362,26 @@ impl RedactYamlConfig {
 
 /// Default settings in YAML config
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "DefaultsRepr")]
 pub struct Defaults {
     /// Default strategy for columns not matching any rule
     pub strategy: StrategyKind,
+}
+
+/// Accepts both the documented flat shape (`defaults: { strategy: skip }`)
+/// and the nested one (`defaults: { strategy: { strategy: skip } }`).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DefaultsRepr {
+    Nested { strategy: StrategyKind },
+    Flat(StrategyKind),
+}
+
+impl From<DefaultsRepr> for Defaults {
+    fn from(repr: DefaultsRepr) -> Self {
+        let strategy = match repr {
+            DefaultsRepr::Nested { strategy } | DefaultsRepr::Flat(strategy) => strategy,
+        };
+        Defaults { strategy }
+    }
 }

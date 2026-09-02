@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.22.0] - 2026-08-11
+## [1.22.0] - 2026-09-02
 
 ### Added
 
@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Browser playground at sql-splitter.dev/playground** — drop a real SQL dump on the page and the actual `generate` pipeline (parser, profiler, inference, generators) runs in the browser via WebAssembly: an analyze-style summary of tables, observed value shapes, and inferred generators, then synthetic INSERTs modeled on the dump. Nothing is uploaded — profiling and generation are local, which is the point: it demonstrates that `generate` models data without needing to see it leave the machine. The full-viewport workbench also shows the resolved `kind: model` YAML (the same document `--emit-config` writes, downloadable for CLI reuse), a structured warnings tab where every diagnostic links to its documentation and explains itself, and output selectors for cross-dialect rendering (a MySQL dump can come out as MSSQL, PostgreSQL, or SQLite) and schema-only/data-only modes. The example dumps are themselves generated from the `everything` stress fixture — 17 tables, all twelve planners, an FK cycle. Analysis streams the dump from disk in 8 MB chunks (`FileReaderSync` over `Blob.slice` feeding the profiler's `Read`), so ingestion memory is one chunk rather than two full copies of the file — a 633 MB dump analyzes in the browser in ~31 s. The wasm build enables `simd128` and optimizes for speed, 30% faster on an 84 MB dump (3.3 s → 2.3 s, ~1.4x native CLI profiling time). The wasm module is a thin `crates/sql-splitter-wasm` wrapper over the existing library pipeline; the only main-crate changes are that `dirs` and `rustyline` are now optional dependencies of the `duckdb-query` feature (they were the last non-optional native-only dependencies blocking a `--no-default-features` wasm build), and `resolved_model_yaml`/`merge_render_warnings` are now `pub`. `generate` also joins the homepage command grid, which had stopped at 12 commands (#95).
 
 ### Fixed
+
+- **`merge` rewrote input bytes and skipped the PostgreSQL FK-check preamble** — the CLI had its own copy of the merge logic that read each file line by line (breaking on non-UTF-8 blobs and normalizing CRLF) and emitted a header without `SET session_replication_role = replica`, unlike every other command. The CLI now drives the library `Merger`, which streams raw bytes and uses the shared dialect header.
+- **PostgreSQL COPY escapes decoded differently per command** — three separate decoders disagreed on `\b`, `\f`, `\v` and octal `\NNN` escapes, so the same dump could redact, convert and sample to different bytes. One decoder in the parser now serves all of them.
+- **String literals ending in a backslash could break out of PostgreSQL quotes** — `sample`, `shard` and COPY-to-INSERT conversion escaped only the quote, producing `'a\'` which is malformed unless `standard_conforming_strings` is on. Backslash-bearing values now render as `E'...'` with doubled backslashes, and MSSQL literals get the `N` prefix.
+- **`redact --generate-config` produced a file `--config` rejected** — the emitted `defaults: { strategy: skip }` did not match the loader's nested shape, and a bare `strategy: null` was read as YAML null. The loader now accepts both shapes, the generator quotes `"null"`, and the `street`/`street_name` fake generators the strategy implemented are accepted by validation.
+- **`generate` could panic rescaling out-of-range decimal bounds** — the min/max rescale used unchecked multiplication; it now falls back to the default on overflow.
+
+### Changed
+
+- **Internal deduplication** — about 1,700 lines of copy-pasted code removed across `convert`, `generate`, `sample`/`shard`, `differ`, `duckdb`, `graph` and the CLI layer, with no intended behavior change beyond the fixes above. `convert` dialect type mapping and the DuckDB DDL stripping are now data-driven rule tables.
+- **Test coverage 83% → 88%** — new suites pin the diff SQL/text output, the redaction PII detector and config round trip, and the two DDL lexers' escape semantics side by side. Binary-driven integration tests now locate the binary via `CARGO_BIN_EXE_sql-splitter` instead of a hardcoded `target/debug` path, so they always test the fresh build.
 
 - **`query` silently dropped every row of a table with no matching `CREATE TABLE`** — a partial or broken dump (e.g. an export that captured structure for one table but data for many) hit `flush_batch`, which cleared the batch and moved on with no warning at all, unlike the sibling missing-table paths for COPY and direct INSERT. Now warns like the others, naming the table and the row count dropped.
 - **A single bad row silently dropped every other row in the same INSERT statement** — when the fast batch path failed, `fallback_execute` replayed the *original* multi-row INSERT statement as one atomic unit, so one row violating a constraint (an explicit `NULL` into a `NOT NULL` column, which some MySQL configurations tolerate) took every valid row in that statement down with it — observed for real on a `tags` table where one bad row dropped all 134. Now retries row by row using the already-parsed values, mirroring the retry the Postgres COPY path already had.

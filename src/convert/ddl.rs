@@ -1078,4 +1078,92 @@ mod tests {
         assert_eq!(cols[0].column, "status");
         assert_eq!(cols[0].labels, vec!["active", "inactive"]);
     }
+
+    #[test]
+    fn mysql_double_quoted_string_literal() {
+        assert_eq!(
+            mysql_refs(r#"CREATE TABLE t (a text DEFAULT "x\", y", m mood);"#)
+                .iter()
+                .map(|r| r.column.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "m"]
+        );
+        let tokens = tokenize(r#""a""b\"c""#, LexRules::for_dialect(SqlDialect::MySql));
+        assert_eq!(tokens, vec![Token::Str(0, 9, "a\"b\"c".into())]);
+    }
+
+    #[test]
+    fn alter_table_change_column_mysql() {
+        let refs = mysql_refs("ALTER TABLE t CHANGE COLUMN old_name new_name ENUM('a','b');");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].column, "new_name");
+        assert_eq!(refs[0].type_name, (None, "ENUM".into()));
+
+        let refs = mysql_refs("ALTER TABLE t CHANGE IF EXISTS a b INT, CHANGE c d TEXT;");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].column, "b");
+        assert_eq!(refs[1].column, "d");
+
+        // CHANGE with nothing usable after it does not panic and yields nothing.
+        assert!(mysql_refs("ALTER TABLE t CHANGE").is_empty());
+        assert!(mysql_refs("ALTER TABLE t CHANGE a;").is_empty());
+    }
+
+    #[test]
+    fn mysql_escape_sequences_decode_to_control_bytes() {
+        let cols = mysql_inline_enum_columns(
+            r"CREATE TABLE t (x ENUM('\b','\n','\r','\t','\%','\_','\0'));",
+        );
+        assert_eq!(
+            cols[0].labels,
+            ["\u{8}", "\n", "\r", "\t", "\\%", "\\_", "\0"]
+        );
+    }
+
+    #[test]
+    fn postgres_unicode_escapes() {
+        let pg = LexRules::for_dialect(SqlDialect::Postgres);
+        let value = |s: &str| match &tokenize(s, pg)[1] {
+            Token::Str(_, _, v) => v.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(value(r"E'A\U0001F600'"), "A😀");
+        // Too few digits: the escape letter is kept literally.
+        assert_eq!(value(r"E'\u12'"), "u12");
+        assert_eq!(value(r"E'\U0041'"), "U0041");
+        // A surrogate is not a char: nothing is emitted.
+        assert_eq!(value(r"E'\uD800x'"), "x");
+        // Octal and \x with no digits.
+        assert_eq!(value(r"E'\101\xZ'"), "AxZ");
+    }
+
+    #[test]
+    fn dollar_tag_without_closing_dollar_is_punctuation() {
+        let pg = LexRules::for_dialect(SqlDialect::Postgres);
+        assert_eq!(
+            tokenize("$tag", pg),
+            vec![Token::Punct(0, b'$'), Token::Ident(1, 4)]
+        );
+        assert_eq!(
+            tokenize("$a-", pg),
+            vec![
+                Token::Punct(0, b'$'),
+                Token::Ident(1, 2),
+                Token::Other(2, 3)
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_enum_skips_comment_before_label_list_and_enum_without_parens() {
+        let stmt = "CREATE TABLE t (x ENUM /* c */ ('a','b'), y ENUM NOT NULL, z ENUM);";
+        let cols = mysql_inline_enum_columns(stmt);
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].column, "x");
+        assert_eq!(cols[0].labels, ["a", "b"]);
+        assert_eq!(
+            &stmt[cols[0].span.0..cols[0].span.1],
+            "ENUM /* c */ ('a','b')"
+        );
+    }
 }

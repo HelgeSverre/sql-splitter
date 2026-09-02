@@ -1549,31 +1549,12 @@ impl Converter {
             || upper.starts_with("COMMENT ON")
     }
 
-    /// Strip leading SQL comments (-- and /* */) from a string
     fn strip_leading_sql_comments(&self, stmt: &str) -> String {
-        let mut result = stmt.trim();
-        loop {
-            // Strip -- comments
-            if result.starts_with("--") {
-                if let Some(pos) = result.find('\n') {
-                    result = result[pos + 1..].trim();
-                    continue;
-                } else {
-                    return String::new();
-                }
-            }
-            // Strip /* */ comments
-            if result.starts_with("/*") {
-                if let Some(pos) = result.find("*/") {
-                    result = result[pos + 2..].trim();
-                    continue;
-                } else {
-                    return String::new();
-                }
-            }
-            break;
-        }
-        result.to_string()
+        String::from_utf8_lossy(crate::parser::strip_leading_comments_and_whitespace(
+            stmt.as_bytes(),
+        ))
+        .trim()
+        .to_string()
     }
 
     /// Check if statement is a SQLite pragma
@@ -1601,27 +1582,17 @@ impl Converter {
     fn convert_identifiers(&self, stmt: &str) -> String {
         match (self.from, self.to) {
             (SqlDialect::MySql, SqlDialect::Postgres | SqlDialect::Sqlite) => {
-                // Backticks → double quotes
                 self.backticks_to_double_quotes(stmt)
             }
-            (SqlDialect::MySql, SqlDialect::Mssql) => {
-                // Backticks → square brackets
-                self.backticks_to_square_brackets(stmt)
-            }
+            (SqlDialect::MySql, SqlDialect::Mssql) => self.backticks_to_square_brackets(stmt),
             (SqlDialect::Postgres | SqlDialect::Sqlite, SqlDialect::MySql) => {
-                // Double quotes → backticks
                 self.double_quotes_to_backticks(stmt)
             }
             (SqlDialect::Postgres | SqlDialect::Sqlite, SqlDialect::Mssql) => {
-                // Double quotes → square brackets
                 self.double_quotes_to_square_brackets(stmt)
             }
-            (SqlDialect::Mssql, SqlDialect::MySql) => {
-                // Square brackets → backticks
-                self.square_brackets_to_backticks(stmt)
-            }
+            (SqlDialect::Mssql, SqlDialect::MySql) => self.square_brackets_to_backticks(stmt),
             (SqlDialect::Mssql, SqlDialect::Postgres | SqlDialect::Sqlite) => {
-                // Square brackets → double quotes
                 self.square_brackets_to_double_quotes(stmt)
             }
             _ => stmt.to_string(),
@@ -1630,127 +1601,32 @@ impl Converter {
 
     /// Convert backticks to double quotes
     pub fn backticks_to_double_quotes(&self, stmt: &str) -> String {
-        let mut result = String::with_capacity(stmt.len());
-        let mut in_string = false;
-        let mut in_backtick = false;
-
-        for c in stmt.chars() {
-            if c == '\'' && !in_backtick {
-                in_string = !in_string;
-                result.push(c);
-            } else if c == '`' && !in_string {
-                in_backtick = !in_backtick;
-                result.push('"');
-            } else {
-                result.push(c);
-            }
-        }
-        result
+        requote(stmt, '`', '"', '"')
     }
 
     /// Convert double quotes to backticks
     pub fn double_quotes_to_backticks(&self, stmt: &str) -> String {
-        let mut result = String::with_capacity(stmt.len());
-        let mut in_string = false;
-        let mut in_dquote = false;
-        let chars = stmt.chars();
-
-        for c in chars {
-            if c == '\'' && !in_dquote {
-                in_string = !in_string;
-                result.push(c);
-            } else if c == '"' && !in_string {
-                in_dquote = !in_dquote;
-                result.push('`');
-            } else {
-                result.push(c);
-            }
-        }
-        result
+        requote(stmt, '"', '`', '`')
     }
 
     /// Convert backticks to square brackets (for MSSQL)
     pub fn backticks_to_square_brackets(&self, stmt: &str) -> String {
-        let mut result = String::with_capacity(stmt.len());
-        let mut in_string = false;
-        let mut in_backtick = false;
-
-        for c in stmt.chars() {
-            if c == '\'' && !in_backtick {
-                in_string = !in_string;
-                result.push(c);
-            } else if c == '`' && !in_string {
-                if !in_backtick {
-                    result.push('[');
-                } else {
-                    result.push(']');
-                }
-                in_backtick = !in_backtick;
-            } else {
-                result.push(c);
-            }
-        }
-        result
+        requote(stmt, '`', '[', ']')
     }
 
     /// Convert double quotes to square brackets (for MSSQL)
     pub fn double_quotes_to_square_brackets(&self, stmt: &str) -> String {
-        let mut result = String::with_capacity(stmt.len());
-        let mut in_string = false;
-        let mut in_dquote = false;
-
-        for c in stmt.chars() {
-            if c == '\'' && !in_dquote {
-                in_string = !in_string;
-                result.push(c);
-            } else if c == '"' && !in_string {
-                if !in_dquote {
-                    result.push('[');
-                } else {
-                    result.push(']');
-                }
-                in_dquote = !in_dquote;
-            } else {
-                result.push(c);
-            }
-        }
-        result
+        requote(stmt, '"', '[', ']')
     }
 
     /// Convert square brackets to backticks (from MSSQL to MySQL)
     pub fn square_brackets_to_backticks(&self, stmt: &str) -> String {
-        let mut result = String::with_capacity(stmt.len());
-        let mut in_string = false;
-
-        for c in stmt.chars() {
-            if c == '\'' {
-                in_string = !in_string;
-                result.push(c);
-            } else if !in_string && (c == '[' || c == ']') {
-                result.push('`');
-            } else {
-                result.push(c);
-            }
-        }
-        result
+        unbracket(stmt, '`')
     }
 
     /// Convert square brackets to double quotes (from MSSQL to PostgreSQL/SQLite)
     pub fn square_brackets_to_double_quotes(&self, stmt: &str) -> String {
-        let mut result = String::with_capacity(stmt.len());
-        let mut in_string = false;
-
-        for c in stmt.chars() {
-            if c == '\'' {
-                in_string = !in_string;
-                result.push(c);
-            } else if !in_string && (c == '[' || c == ']') {
-                result.push('"');
-            } else {
-                result.push(c);
-            }
-        }
-        result
+        unbracket(stmt, '"')
     }
 
     /// Convert data types between dialects
@@ -2898,4 +2774,47 @@ fn map_outside_string_literals(stmt: &str, f: impl Fn(&str) -> String) -> String
     }
     out.push_str(&f(&stmt[seg_start..]));
     out
+}
+
+/// Rewrite one self-delimiting identifier quote (`` ` `` or `"`) into
+/// `to_open`/`to_close`, skipping single-quoted string literals. A `'`
+/// inside a quoted identifier does not open a string.
+fn requote(stmt: &str, from: char, to_open: char, to_close: char) -> String {
+    let mut result = String::with_capacity(stmt.len());
+    let mut in_string = false;
+    let mut in_ident = false;
+
+    for c in stmt.chars() {
+        if c == '\'' && !in_ident {
+            in_string = !in_string;
+            result.push(c);
+        } else if c == from && !in_string {
+            result.push(if in_ident { to_close } else { to_open });
+            in_ident = !in_ident;
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Rewrite MSSQL `[`/`]` into `to`, skipping single-quoted string literals.
+/// Deliberately tracks no identifier state: mapping every bracket 1:1 turns
+/// the `]]` escape into a doubled `to` quote, which is exactly the escape
+/// MySQL and PostgreSQL expect.
+fn unbracket(stmt: &str, to: char) -> String {
+    let mut result = String::with_capacity(stmt.len());
+    let mut in_string = false;
+
+    for c in stmt.chars() {
+        if c == '\'' {
+            in_string = !in_string;
+            result.push(c);
+        } else if !in_string && (c == '[' || c == ']') {
+            result.push(to);
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }

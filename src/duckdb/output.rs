@@ -172,15 +172,7 @@ impl QueryResultFormatter {
         let rows: Vec<serde_json::Value> = result
             .rows
             .iter()
-            .map(|row| {
-                let obj: serde_json::Map<String, serde_json::Value> = result
-                    .columns
-                    .iter()
-                    .zip(row.iter())
-                    .map(|(col, val)| (col.clone(), Self::json_value(val)))
-                    .collect();
-                serde_json::Value::Object(obj)
-            })
+            .map(|row| serde_json::Value::Object(Self::row_object(&result.columns, row)))
             .collect();
 
         serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".to_string())
@@ -192,17 +184,26 @@ impl QueryResultFormatter {
             .rows
             .iter()
             .map(|row| {
-                let obj: serde_json::Map<String, serde_json::Value> = result
-                    .columns
-                    .iter()
-                    .zip(row.iter())
-                    .map(|(col, val)| (col.clone(), Self::json_value(val)))
-                    .collect();
-                serde_json::to_string(&serde_json::Value::Object(obj))
-                    .unwrap_or_else(|_| "{}".to_string())
+                serde_json::to_string(&serde_json::Value::Object(Self::row_object(
+                    &result.columns,
+                    row,
+                )))
+                .unwrap_or_else(|_| "{}".to_string())
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Zip column names with one row's values into a JSON object
+    fn row_object(
+        columns: &[String],
+        row: &[String],
+    ) -> serde_json::Map<String, serde_json::Value> {
+        columns
+            .iter()
+            .zip(row.iter())
+            .map(|(col, val)| (col.clone(), Self::json_value(val)))
+            .collect()
     }
 
     /// Convert a string value to appropriate JSON type

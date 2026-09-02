@@ -22,24 +22,29 @@
 //! the open decision never perturbs the duration stream and a seeded run
 //! repeats exactly.
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use chrono_tz::Tz;
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
 use serde_yaml_ng::Value;
 
 use crate::diagnostic::DiagnosticBag;
+use crate::generate::generators::observed::standard_normal;
 use crate::generate::registry::{
     ArgumentSpec, Buffering, ColumnScope, CompileContext, CompiledPlanner, Determinism,
-    PlannerDescriptor, PlannerFactory, PlannerPredicate, PredicateGuard, Verification,
+    PlannerDescriptor, PlannerPredicate, PredicateGuard, Verification,
 };
 use crate::generate::seed::StreamId;
 use crate::generate::value::{GenerateError, GeneratedValue};
 use crate::synthetic::model::PlannerConfig;
-use crate::synthetic::schema::{PortableColumn, PortableTable, SqlTypeFamily};
+use crate::synthetic::schema::SqlTypeFamily;
 
-/// Nanoseconds per second, the base unit conversion for the interval equation.
-const NANOS_PER_SECOND: i128 = 1_000_000_000;
+use super::structural::{
+    check_nonneg_bounded, compile_instant_block, render_flag, render_instant, InstantDraw,
+    RenderZone,
+};
+use super::{
+    as_f64, as_i128, planner_factory, render_integer, resolve_role, unit_nanos, NANOS_PER_SECOND,
+};
 
 /// Static description of the `temporal.interval` planner.
 pub static TEMPORAL_INTERVAL_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
@@ -94,20 +99,11 @@ pub static TEMPORAL_INTERVAL_DESCRIPTOR: PlannerDescriptor = PlannerDescriptor {
 /// Factory for the `temporal.interval` planner.
 pub struct TemporalIntervalFactory;
 
-impl PlannerFactory for TemporalIntervalFactory {
-    fn descriptor(&self) -> &'static PlannerDescriptor {
-        &TEMPORAL_INTERVAL_DESCRIPTOR
-    }
-
-    fn compile(
-        &self,
-        config: &PlannerConfig,
-        context: &CompileContext<'_>,
-    ) -> Result<Box<dyn CompiledPlanner>, DiagnosticBag> {
-        compile_interval(config, context)
-            .map(|planner| Box::new(planner) as Box<dyn CompiledPlanner>)
-    }
-}
+planner_factory!(
+    TemporalIntervalFactory,
+    TEMPORAL_INTERVAL_DESCRIPTOR,
+    compile_interval
+);
 
 // --- Resolved column roles --------------------------------------------------
 
@@ -135,16 +131,6 @@ struct OpenColumn {
     open_value: bool,
 }
 
-/// How each row's start instant is chosen.
-enum StartKind {
-    /// A uniformly random instant in the inclusive `[min_ns, max_ns]` range.
-    /// Covers both `range` and `observed_range` (the latter's bounds come from
-    /// an observed profile; the mechanism is identical).
-    Range { min_ns: i128, max_ns: i128 },
-    /// A strictly increasing instant: row `n` starts at `min_ns + n * step_ns`.
-    Monotonic { min_ns: i128, step_ns: i128 },
-}
-
 /// How each row's duration (in whole units) is chosen. All variants yield a
 /// non-negative integer count of units bounded by the configured range.
 enum DurationDraw {
@@ -167,16 +153,6 @@ enum DurationDraw {
     },
 }
 
-/// How instants are rendered to wall-clock text.
-enum RenderZone {
-    /// Render UTC wall clock with no offset (`preserve` keeps the observed
-    /// zone; with no observed original zone it renders as UTC).
-    Utc,
-    /// Render the wall clock of a named IANA zone, DST-aware, with an explicit
-    /// offset so the absolute instant round-trips.
-    Named(Tz),
-}
-
 // --- The compiled planner ---------------------------------------------------
 
 /// The compiled `temporal.interval` planner.
@@ -188,7 +164,7 @@ struct TemporalIntervalPlanner {
     end: TimestampColumn,
     duration: DurationColumn,
     open: Option<OpenColumn>,
-    start_kind: StartKind,
+    start_kind: InstantDraw,
     duration_draw: DurationDraw,
     open_probability: f64,
     end_inclusive: bool,
@@ -245,7 +221,7 @@ impl CompiledPlanner for TemporalIntervalPlanner {
                 .checked_add(delta_ns)
                 .ok_or_else(interval_overflow)?;
             output[1] = render_instant(end_ns, &self.zone, &self.end.family)?;
-            output[2] = render_duration(duration_units, &self.duration.family);
+            output[2] = render_integer(duration_units, &self.duration.family);
         }
 
         if let Some(open) = &self.open {
@@ -263,15 +239,7 @@ impl CompiledPlanner for TemporalIntervalPlanner {
 impl TemporalIntervalPlanner {
     /// The start instant for `row_index`, in epoch nanoseconds.
     fn draw_start(&mut self, row_index: u64) -> i128 {
-        match self.start_kind {
-            StartKind::Range { min_ns, max_ns } => self.start_rng.random_range(min_ns..=max_ns),
-            StartKind::Monotonic { min_ns, step_ns } => {
-                // Saturating keeps a very long run inside the representable
-                // range instead of wrapping; the equation still holds on the
-                // clamped instant.
-                min_ns.saturating_add(step_ns.saturating_mul(row_index as i128))
-            }
-        }
+        self.start_kind.draw(&mut self.start_rng, row_index)
     }
 
     /// The duration for a row, in whole units (always non-negative).
@@ -295,7 +263,7 @@ impl TemporalIntervalPlanner {
                 min,
                 max,
             } => {
-                let z = self.standard_normal();
+                let z = standard_normal(&mut self.duration_rng);
                 let value = (mean + z * stddev).round() as i128;
                 // Tolerate an inverted range (min > max) like the uniform/skewed
                 // arms: collapse to `min` rather than panicking in std `clamp`.
@@ -313,60 +281,18 @@ impl TemporalIntervalPlanner {
         }
     }
 
-    /// A standard-normal draw via Box–Muller from the duration stream.
-    fn standard_normal(&mut self) -> f64 {
-        // Guard the log against exactly zero.
-        let u1 = (self.duration_rng.random::<f64>()).max(f64::MIN_POSITIVE);
-        let u2 = self.duration_rng.random::<f64>();
-        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
-    }
-
     /// The duration value an open row carries: `NULL` when the column is
     /// nullable, otherwise a coherent zero (no completed duration yet).
     fn open_duration(&self) -> GeneratedValue {
         if self.duration.nullable {
             GeneratedValue::Null
         } else {
-            render_duration(0, &self.duration.family)
+            render_integer(0, &self.duration.family)
         }
     }
 }
 
 // --- Rendering --------------------------------------------------------------
-
-/// Render an epoch-nanosecond instant to a wall-clock literal in `zone`, in the
-/// representation `family` expects.
-fn render_instant(
-    instant_ns: i128,
-    zone: &RenderZone,
-    family: &SqlTypeFamily,
-) -> Result<GeneratedValue, GenerateError> {
-    let text = format_instant(instant_ns, zone)?;
-    Ok(match family {
-        SqlTypeFamily::DateTime => GeneratedValue::DateTime(text),
-        _ => GeneratedValue::Text(text),
-    })
-}
-
-/// Format an epoch-nanosecond instant as wall-clock text in `zone`. An instant
-/// outside chrono's representable timestamp range is an error rather than a
-/// silent fallback to the 1970 epoch (which would break the interval equation).
-fn format_instant(instant_ns: i128, zone: &RenderZone) -> Result<String, GenerateError> {
-    let secs = instant_ns.div_euclid(NANOS_PER_SECOND);
-    let nanos = instant_ns.rem_euclid(NANOS_PER_SECOND) as u32;
-    let secs = i64::try_from(secs).map_err(|_| instant_overflow())?;
-    let utc = DateTime::<Utc>::from_timestamp(secs, nanos).ok_or_else(instant_overflow)?;
-    Ok(match zone {
-        RenderZone::Utc => utc.format("%Y-%m-%d %H:%M:%S").to_string(),
-        // Include the offset for a named zone so the absolute instant round-
-        // trips even across a DST transition (the offset disambiguates the
-        // repeated wall-clock hour).
-        RenderZone::Named(tz) => utc
-            .with_timezone(tz)
-            .format("%Y-%m-%d %H:%M:%S%:z")
-            .to_string(),
-    })
-}
 
 /// The error for an interval arithmetic step that overflows the representable
 /// instant range.
@@ -374,30 +300,6 @@ fn interval_overflow() -> GenerateError {
     GenerateError::Overflow(
         "temporal.interval: start + duration overflows the representable instant range".to_string(),
     )
-}
-
-/// The error for an instant that falls outside chrono's representable range.
-fn instant_overflow() -> GenerateError {
-    GenerateError::Overflow(
-        "temporal.interval: instant is outside the representable timestamp range".to_string(),
-    )
-}
-
-/// Render a duration (in whole units) in the representation `family` expects.
-fn render_duration(units: i128, family: &SqlTypeFamily) -> GeneratedValue {
-    match family {
-        SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => GeneratedValue::Integer(units),
-        _ => GeneratedValue::Text(units.to_string()),
-    }
-}
-
-/// Render an open-flag boolean in the representation `family` expects.
-fn render_flag(flag: bool, family: &SqlTypeFamily) -> GeneratedValue {
-    match family {
-        SqlTypeFamily::Boolean => GeneratedValue::Boolean(flag),
-        SqlTypeFamily::Integer | SqlTypeFamily::BigInteger => GeneratedValue::Integer(flag as i128),
-        _ => GeneratedValue::Text(flag.to_string()),
-    }
 }
 
 // --- Compilation ------------------------------------------------------------
@@ -413,23 +315,25 @@ fn compile_interval(
     let path = context.path();
 
     let columns = config.args.get("columns");
-    let start_col = resolve_role(columns, "start", table, path, &mut bag);
-    let end_col = resolve_role(columns, "end", table, path, &mut bag);
-    let duration_col = resolve_role(columns, "duration", table, path, &mut bag);
+    const PLANNER: &str = TEMPORAL_INTERVAL_DESCRIPTOR.kind;
+    const COLUMN_CODE: &str = crate::diagnostic::codes::INTERVAL_COLUMN_MISSING.code;
+    let mut resolve = |role: &str, required: bool| {
+        resolve_role(
+            columns,
+            role,
+            table,
+            path,
+            PLANNER,
+            COLUMN_CODE,
+            required,
+            &mut bag,
+        )
+    };
+    let start_col = resolve("start", true);
+    let end_col = resolve("end", true);
+    let duration_col = resolve("duration", true);
     // `open` is optional; only resolve it (and validate existence) if named.
-    let open_col = role_name(columns, "open").and_then(|name| {
-        find_column(table, name).or_else(|| {
-            bag.error(
-                crate::diagnostic::codes::INTERVAL_COLUMN_MISSING.code,
-                format!("{path}.columns.open"),
-                format!(
-                    "temporal.interval `open` column `{name}` does not exist on table `{}`",
-                    table.name
-                ),
-            );
-            None
-        })
-    });
+    let open_col = resolve("open", false);
 
     let open_probability = config
         .args
@@ -460,7 +364,13 @@ fn compile_interval(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let start_kind = compile_start(config.args.get("start"), path, &mut bag);
+    let start_kind = compile_instant_block(
+        config.args.get("start"),
+        "temporal.interval `start`",
+        crate::diagnostic::codes::INTERVAL_START.code,
+        &format!("{path}.start"),
+        &mut bag,
+    );
     let (duration_draw, unit_nanos) = compile_duration(config.args.get("duration"), path, &mut bag);
     let zone = compile_zone(config.args.get("timezone"), path, &mut bag);
 
@@ -550,101 +460,6 @@ fn compile_interval(
     })
 }
 
-/// Resolve a required column role to its schema column, reporting a missing
-/// role or a role naming an absent column.
-fn resolve_role<'a>(
-    columns: Option<&Value>,
-    role: &str,
-    table: &'a PortableTable,
-    path: &str,
-    bag: &mut DiagnosticBag,
-) -> Option<&'a PortableColumn> {
-    let Some(name) = role_name(columns, role) else {
-        bag.error(
-            crate::diagnostic::codes::INTERVAL_COLUMN_MISSING.code,
-            format!("{path}.columns.{role}"),
-            format!("temporal.interval requires a `{role}` column under `columns`"),
-        );
-        return None;
-    };
-    let column = find_column(table, name);
-    if column.is_none() {
-        bag.error(
-            crate::diagnostic::codes::INTERVAL_COLUMN_MISSING.code,
-            format!("{path}.columns.{role}"),
-            format!(
-                "temporal.interval `{role}` column `{name}` does not exist on table `{}`",
-                table.name
-            ),
-        );
-    }
-    column
-}
-
-/// The column name a `columns:` mapping assigns to `role`, if any.
-fn role_name<'a>(columns: Option<&'a Value>, role: &str) -> Option<&'a str> {
-    columns?.get(role).and_then(Value::as_str)
-}
-
-fn find_column<'a>(table: &'a PortableTable, name: &str) -> Option<&'a PortableColumn> {
-    table.columns.iter().find(|column| column.name == name)
-}
-
-/// Compile the `start:` block into a [`StartKind`]. Returns `None` (after
-/// recording an error) when the config is malformed.
-fn compile_start(start: Option<&Value>, path: &str, bag: &mut DiagnosticBag) -> Option<StartKind> {
-    let kind = start.and_then(|s| s.get("kind")).and_then(Value::as_str);
-    let min_ns = start
-        .and_then(|s| s.get("min"))
-        .and_then(as_instant_ns)
-        .or_else(|| {
-            bag.error(
-                crate::diagnostic::codes::INTERVAL_START.code,
-                format!("{path}.start.min"),
-                "temporal.interval `start` requires a parseable `min` timestamp".to_string(),
-            );
-            None
-        })?;
-
-    match kind {
-        Some("monotonic") => {
-            let step_seconds = start
-                .and_then(|s| s.get("step_seconds"))
-                .and_then(as_i128)
-                .unwrap_or(1)
-                .max(1);
-            Some(StartKind::Monotonic {
-                min_ns,
-                step_ns: step_seconds.saturating_mul(NANOS_PER_SECOND),
-            })
-        }
-        // `range`, `observed_range`, or an omitted kind: a bounded random draw.
-        _ => {
-            let max_ns = start
-                .and_then(|s| s.get("max"))
-                .and_then(as_instant_ns)
-                .or_else(|| {
-                    bag.error(
-                        crate::diagnostic::codes::INTERVAL_START.code,
-                        format!("{path}.start.max"),
-                        "temporal.interval `start` range requires a parseable `max` timestamp"
-                            .to_string(),
-                    );
-                    None
-                })?;
-            if max_ns < min_ns {
-                bag.error(
-                    crate::diagnostic::codes::INTERVAL_START.code,
-                    format!("{path}.start"),
-                    "temporal.interval `start.max` is before `start.min`".to_string(),
-                );
-                return None;
-            }
-            Some(StartKind::Range { min_ns, max_ns })
-        }
-    }
-}
-
 /// Compile the `duration:` block into a [`DurationDraw`] plus its unit size in
 /// nanoseconds. Reports negative and overflowing durations and unknown units.
 fn compile_duration(
@@ -665,6 +480,8 @@ fn compile_duration(
         return (None, None);
     };
 
+    const DURATION_CODE: &str = crate::diagnostic::codes::INTERVAL_DURATION.code;
+    let duration_path = format!("{path}.duration");
     let field_i128 = |key: &str| duration.and_then(|d| d.get(key)).and_then(as_i128);
     let field_f64 = |key: &str| duration.and_then(|d| d.get(key)).and_then(as_f64);
     let kind = duration.and_then(|d| d.get("kind")).and_then(Value::as_str);
@@ -672,7 +489,15 @@ fn compile_duration(
     let draw = match kind {
         Some("fixed") => {
             let value = field_i128("value").unwrap_or(0);
-            check_nonneg_bounded(value, unit_nanos, path, bag);
+            check_nonneg_bounded(
+                value,
+                unit_nanos,
+                "temporal.interval",
+                "duration",
+                DURATION_CODE,
+                &duration_path,
+                bag,
+            );
             DurationDraw::Fixed(value)
         }
         Some("normal") => {
@@ -680,8 +505,24 @@ fn compile_duration(
             let stddev = field_f64("stddev").unwrap_or(0.0).abs();
             let min = field_i128("min").unwrap_or(0);
             let max = field_i128("max").unwrap_or(min);
-            check_nonneg_bounded(min, unit_nanos, path, bag);
-            check_nonneg_bounded(max, unit_nanos, path, bag);
+            check_nonneg_bounded(
+                min,
+                unit_nanos,
+                "temporal.interval",
+                "duration",
+                DURATION_CODE,
+                &duration_path,
+                bag,
+            );
+            check_nonneg_bounded(
+                max,
+                unit_nanos,
+                "temporal.interval",
+                "duration",
+                DURATION_CODE,
+                &duration_path,
+                bag,
+            );
             DurationDraw::Normal {
                 mean,
                 stddev,
@@ -692,16 +533,48 @@ fn compile_duration(
         Some("histogram") | Some("observed") => {
             let min = field_i128("min").unwrap_or(0);
             let max = field_i128("max").unwrap_or(min);
-            check_nonneg_bounded(min, unit_nanos, path, bag);
-            check_nonneg_bounded(max, unit_nanos, path, bag);
+            check_nonneg_bounded(
+                min,
+                unit_nanos,
+                "temporal.interval",
+                "duration",
+                DURATION_CODE,
+                &duration_path,
+                bag,
+            );
+            check_nonneg_bounded(
+                max,
+                unit_nanos,
+                "temporal.interval",
+                "duration",
+                DURATION_CODE,
+                &duration_path,
+                bag,
+            );
             DurationDraw::Skewed { min, max }
         }
         // `uniform`, or an omitted kind.
         _ => {
             let min = field_i128("min").unwrap_or(0);
             let max = field_i128("max").unwrap_or(min);
-            check_nonneg_bounded(min, unit_nanos, path, bag);
-            check_nonneg_bounded(max, unit_nanos, path, bag);
+            check_nonneg_bounded(
+                min,
+                unit_nanos,
+                "temporal.interval",
+                "duration",
+                DURATION_CODE,
+                &duration_path,
+                bag,
+            );
+            check_nonneg_bounded(
+                max,
+                unit_nanos,
+                "temporal.interval",
+                "duration",
+                DURATION_CODE,
+                &duration_path,
+                bag,
+            );
             DurationDraw::Uniform { min, max }
         }
     };
@@ -717,25 +590,6 @@ fn min_duration_units(draw: &DurationDraw) -> i128 {
         DurationDraw::Uniform { min, .. }
         | DurationDraw::Skewed { min, .. }
         | DurationDraw::Normal { min, .. } => *min,
-    }
-}
-
-/// Report a negative duration bound or one whose nanosecond span overflows.
-fn check_nonneg_bounded(units: i128, unit_nanos: i128, path: &str, bag: &mut DiagnosticBag) {
-    if units < 0 {
-        bag.error(
-            crate::diagnostic::codes::INTERVAL_DURATION.code,
-            format!("{path}.duration"),
-            format!("temporal.interval duration `{units}` is negative; durations must be >= 0"),
-        );
-    } else if units.checked_mul(unit_nanos).is_none() {
-        bag.error(
-            crate::diagnostic::codes::INTERVAL_DURATION.code,
-            format!("{path}.duration"),
-            format!(
-                "temporal.interval duration `{units}` overflows the representable nanosecond range at this unit"
-            ),
-        );
     }
 }
 
@@ -793,7 +647,7 @@ fn build_predicates(
     end: &TimestampColumn,
     duration: &DurationColumn,
     open: Option<&OpenColumn>,
-    start_kind: &StartKind,
+    start_kind: &InstantDraw,
     open_probability: f64,
     end_inclusive: bool,
 ) -> Vec<PlannerPredicate> {
@@ -839,7 +693,7 @@ fn build_predicates(
         }
     }
 
-    if let StartKind::Range { min_ns, max_ns } = start_kind {
+    if let InstantDraw::Range { min_ns, max_ns } = start_kind {
         predicates.push(PlannerPredicate::InRange {
             column: start.name.clone(),
             min_nanos: *min_ns,
@@ -848,61 +702,4 @@ fn build_predicates(
     }
 
     predicates
-}
-
-// --- Value parsing helpers --------------------------------------------------
-
-fn unit_nanos(unit: &str) -> Option<i128> {
-    let nanos = match unit {
-        "nanosecond" | "nanoseconds" | "ns" => 1,
-        "microsecond" | "microseconds" | "us" => 1_000,
-        "millisecond" | "milliseconds" | "ms" => 1_000_000,
-        "second" | "seconds" | "sec" | "s" => NANOS_PER_SECOND,
-        "minute" | "minutes" | "min" => 60 * NANOS_PER_SECOND,
-        "hour" | "hours" | "hr" | "h" => 3_600 * NANOS_PER_SECOND,
-        "day" | "days" | "d" => 86_400 * NANOS_PER_SECOND,
-        _ => return None,
-    };
-    Some(nanos)
-}
-
-fn as_i128(value: &Value) -> Option<i128> {
-    match value {
-        Value::Number(number) => number
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| number.as_u64().map(i128::from))
-            .or_else(|| number.as_f64().map(|float| float as i128)),
-        Value::String(text) => text.trim().parse::<i128>().ok(),
-        _ => None,
-    }
-}
-
-fn as_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
-/// Parse a timestamp value into epoch nanoseconds. Accepts RFC 3339
-/// (`2024-01-01T00:00:00Z`), space- or `T`-separated naive timestamps, and bare
-/// dates (interpreted as UTC midnight).
-fn as_instant_ns(value: &Value) -> Option<i128> {
-    let text = value.as_str()?.trim();
-    if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
-        return Some(
-            i128::from(dt.timestamp()) * NANOS_PER_SECOND + i128::from(dt.timestamp_subsec_nanos()),
-        );
-    }
-    for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
-        if let Ok(naive) = NaiveDateTime::parse_from_str(text, format) {
-            return Some(i128::from(naive.and_utc().timestamp()) * NANOS_PER_SECOND);
-        }
-    }
-    NaiveDate::parse_from_str(text, "%Y-%m-%d")
-        .ok()
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-        .map(|naive| i128::from(naive.and_utc().timestamp()) * NANOS_PER_SECOND)
 }

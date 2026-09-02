@@ -1,6 +1,6 @@
 //! Graphviz DOT format output for ERD diagrams.
 
-use crate::graph::format::Layout;
+use crate::graph::format::{escape_html, Layout};
 use crate::graph::view::GraphView;
 
 /// Generate DOT format output with ERD-style tables showing all columns
@@ -108,14 +108,6 @@ fn generate_table_label(table: &crate::graph::view::TableInfo) -> String {
     html
 }
 
-/// Escape a string for use in DOT HTML labels
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 /// Escape a string for use as a DOT node ID
 fn escape_dot_id(s: &str) -> String {
     if s.chars().all(|c| c.is_alphanumeric() || c == '_') && !s.is_empty() {
@@ -128,76 +120,8 @@ fn escape_dot_id(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::view::{Cardinality, ColumnInfo, EdgeInfo, TableInfo};
-    use ahash::AHashMap;
 
-    fn create_test_view() -> GraphView {
-        let mut tables = AHashMap::new();
-
-        tables.insert(
-            "users".to_string(),
-            TableInfo {
-                name: "users".to_string(),
-                columns: vec![
-                    ColumnInfo {
-                        name: "id".to_string(),
-                        col_type: "INT".to_string(),
-                        is_primary_key: true,
-                        is_foreign_key: false,
-                        is_nullable: false,
-                        references_table: None,
-                        references_column: None,
-                    },
-                    ColumnInfo {
-                        name: "email".to_string(),
-                        col_type: "VARCHAR(255)".to_string(),
-                        is_primary_key: false,
-                        is_foreign_key: false,
-                        is_nullable: false,
-                        references_table: None,
-                        references_column: None,
-                    },
-                ],
-            },
-        );
-
-        tables.insert(
-            "orders".to_string(),
-            TableInfo {
-                name: "orders".to_string(),
-                columns: vec![
-                    ColumnInfo {
-                        name: "id".to_string(),
-                        col_type: "INT".to_string(),
-                        is_primary_key: true,
-                        is_foreign_key: false,
-                        is_nullable: false,
-                        references_table: None,
-                        references_column: None,
-                    },
-                    ColumnInfo {
-                        name: "user_id".to_string(),
-                        col_type: "INT".to_string(),
-                        is_primary_key: false,
-                        is_foreign_key: true,
-                        is_nullable: false,
-                        references_table: Some("users".to_string()),
-                        references_column: Some("id".to_string()),
-                    },
-                ],
-            },
-        );
-
-        let edges = vec![EdgeInfo {
-            from_table: "orders".to_string(),
-            from_column: "user_id".to_string(),
-            to_table: "users".to_string(),
-            to_column: "id".to_string(),
-            cardinality: Cardinality::ManyToOne,
-        }];
-
-        GraphView { tables, edges }
-    }
+    use crate::graph::test_fixtures::create_test_view;
 
     #[test]
     fn test_dot_contains_table_structure() {

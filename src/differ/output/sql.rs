@@ -6,6 +6,14 @@ use crate::differ::DiffResult;
 use crate::parser::SqlDialect;
 use crate::transform_common::{quote_ident, quote_identifier};
 
+/// Quote and comma-join column names for `dialect`.
+fn quote_cols(dialect: SqlDialect, cols: &[String]) -> String {
+    cols.iter()
+        .map(|c| quote_identifier(dialect, c))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Format diff result as SQL migration script
 pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
     let mut output = String::new();
@@ -60,12 +68,8 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
             output.push_str(&col_defs.join(",\n"));
 
             if !table.primary_key.is_empty() {
-                let pk_cols: Vec<String> = table
-                    .primary_key
-                    .iter()
-                    .map(|column| quote_identifier(dialect, column))
-                    .collect();
-                output.push_str(&format!(",\n  PRIMARY KEY ({})", pk_cols.join(", ")));
+                let pk_cols = quote_cols(dialect, &table.primary_key);
+                output.push_str(&format!(",\n  PRIMARY KEY ({})", pk_cols));
             }
 
             output.push_str("\n);\n\n");
@@ -181,16 +185,8 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
 
         // Add foreign keys
         for fk in &modification.fks_added {
-            let fk_cols: Vec<String> = fk
-                .columns
-                .iter()
-                .map(|column| quote_identifier(dialect, column))
-                .collect();
-            let ref_cols: Vec<String> = fk
-                .referenced_columns
-                .iter()
-                .map(|column| quote_identifier(dialect, column))
-                .collect();
+            let fk_cols = quote_cols(dialect, &fk.columns);
+            let ref_cols = quote_cols(dialect, &fk.referenced_columns);
 
             let constraint_name = fk
                 .name
@@ -202,9 +198,9 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                 "ALTER TABLE {} ADD {}FOREIGN KEY ({}) REFERENCES {}({});\n",
                 quote_ident(dialect, &modification.table_name),
                 constraint_name,
-                fk_cols.join(", "),
+                fk_cols,
                 quote_ident(dialect, &fk.referenced_table),
-                ref_cols.join(", ")
+                ref_cols
             ));
         }
 
@@ -246,11 +242,7 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
         // Add indexes
         for idx in &modification.indexes_added {
             let unique = if idx.is_unique { "UNIQUE " } else { "" };
-            let idx_cols: Vec<String> = idx
-                .columns
-                .iter()
-                .map(|column| quote_identifier(dialect, column))
-                .collect();
+            let idx_cols = quote_cols(dialect, &idx.columns);
 
             match dialect {
                 SqlDialect::Postgres => {
@@ -265,7 +257,7 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                         quote_identifier(dialect, &idx.name),
                         quote_ident(dialect, &modification.table_name),
                         using,
-                        idx_cols.join(", ")
+                        idx_cols
                     ));
                 }
                 _ => {
@@ -274,7 +266,7 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                         unique,
                         quote_identifier(dialect, &idx.name),
                         quote_ident(dialect, &modification.table_name),
-                        idx_cols.join(", ")
+                        idx_cols
                     ));
                 }
             }
@@ -330,19 +322,6 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                         "ALTER TABLE {} DROP PRIMARY KEY;\n",
                         quote_ident(dialect, &modification.table_name)
                     ));
-                    if let Some(ref new_pk_cols) = modification.new_pk {
-                        if !new_pk_cols.is_empty() {
-                            let pk_cols: Vec<String> = new_pk_cols
-                                .iter()
-                                .map(|column| quote_identifier(dialect, column))
-                                .collect();
-                            output.push_str(&format!(
-                                "ALTER TABLE {} ADD PRIMARY KEY ({});\n",
-                                quote_ident(dialect, &modification.table_name),
-                                pk_cols.join(", ")
-                            ));
-                        }
-                    }
                 }
                 SqlDialect::Postgres | SqlDialect::Mssql => {
                     output.push_str(&format!(
@@ -350,24 +329,22 @@ pub fn format_sql(result: &DiffResult, dialect: SqlDialect) -> String {
                         quote_ident(dialect, &modification.table_name),
                         modification.table_name
                     ));
-                    if let Some(ref new_pk_cols) = modification.new_pk {
-                        if !new_pk_cols.is_empty() {
-                            let pk_cols: Vec<String> = new_pk_cols
-                                .iter()
-                                .map(|column| quote_identifier(dialect, column))
-                                .collect();
-                            output.push_str(&format!(
-                                "ALTER TABLE {} ADD PRIMARY KEY ({});\n",
-                                quote_ident(dialect, &modification.table_name),
-                                pk_cols.join(", ")
-                            ));
-                        }
-                    }
                 }
                 SqlDialect::Sqlite => {
                     output.push_str(
                         "-- SQLite does not support ALTER PRIMARY KEY; table recreation required\n",
                     );
+                }
+            }
+            if dialect != SqlDialect::Sqlite {
+                if let Some(new_pk_cols) =
+                    modification.new_pk.as_deref().filter(|pk| !pk.is_empty())
+                {
+                    output.push_str(&format!(
+                        "ALTER TABLE {} ADD PRIMARY KEY ({});\n",
+                        quote_ident(dialect, &modification.table_name),
+                        quote_cols(dialect, new_pk_cols)
+                    ));
                 }
             }
         }

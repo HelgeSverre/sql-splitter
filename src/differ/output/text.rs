@@ -1,5 +1,6 @@
 //! Text output formatter for diff results.
 
+use crate::differ::schema::IndexInfo;
 use crate::differ::DiffResult;
 
 /// Format diff result as human-readable text
@@ -105,35 +106,11 @@ pub fn format_text(result: &DiffResult) -> String {
                 }
 
                 for idx in &modification.indexes_added {
-                    let unique_marker = if idx.is_unique { " [unique]" } else { "" };
-                    let type_marker = idx
-                        .index_type
-                        .as_ref()
-                        .map(|t| format!(" [{}]", t))
-                        .unwrap_or_default();
-                    output.push_str(&format!(
-                        "      + Index '{}' on ({}){}{}\n",
-                        idx.name,
-                        idx.columns.join(", "),
-                        unique_marker,
-                        type_marker
-                    ));
+                    index_line(&mut output, '+', idx);
                 }
 
                 for idx in &modification.indexes_removed {
-                    let unique_marker = if idx.is_unique { " [unique]" } else { "" };
-                    let type_marker = idx
-                        .index_type
-                        .as_ref()
-                        .map(|t| format!(" [{}]", t))
-                        .unwrap_or_default();
-                    output.push_str(&format!(
-                        "      - Index '{}' on ({}){}{}\n",
-                        idx.name,
-                        idx.columns.join(", "),
-                        unique_marker,
-                        type_marker
-                    ));
+                    index_line(&mut output, '-', idx);
                 }
             }
         }
@@ -181,50 +158,26 @@ pub fn format_text(result: &DiffResult) -> String {
                 ));
 
                 // Show sample PKs if available (verbose mode)
-                if !diff.sample_added_pks.is_empty() {
-                    let samples = &diff.sample_added_pks;
-                    let remaining = diff.added_count as usize - samples.len();
-                    let suffix = if remaining > 0 {
-                        format!("... (+{} more)", remaining)
-                    } else {
-                        String::new()
-                    };
-                    output.push_str(&format!(
-                        "    Added PKs: {}{}\n",
-                        samples.join(", "),
-                        suffix
-                    ));
-                }
+                sample_line(
+                    &mut output,
+                    "Added",
+                    &diff.sample_added_pks,
+                    diff.added_count,
+                );
 
-                if !diff.sample_removed_pks.is_empty() {
-                    let samples = &diff.sample_removed_pks;
-                    let remaining = diff.removed_count as usize - samples.len();
-                    let suffix = if remaining > 0 {
-                        format!("... (+{} more)", remaining)
-                    } else {
-                        String::new()
-                    };
-                    output.push_str(&format!(
-                        "    Removed PKs: {}{}\n",
-                        samples.join(", "),
-                        suffix
-                    ));
-                }
+                sample_line(
+                    &mut output,
+                    "Removed",
+                    &diff.sample_removed_pks,
+                    diff.removed_count,
+                );
 
-                if !diff.sample_modified_pks.is_empty() {
-                    let samples = &diff.sample_modified_pks;
-                    let remaining = diff.modified_count as usize - samples.len();
-                    let suffix = if remaining > 0 {
-                        format!("... (+{} more)", remaining)
-                    } else {
-                        String::new()
-                    };
-                    output.push_str(&format!(
-                        "    Modified PKs: {}{}\n",
-                        samples.join(", "),
-                        suffix
-                    ));
-                }
+                sample_line(
+                    &mut output,
+                    "Modified",
+                    &diff.sample_modified_pks,
+                    diff.modified_count,
+                );
             }
         }
 
@@ -260,4 +213,41 @@ pub fn format_text(result: &DiffResult) -> String {
     }
 
     output
+}
+
+/// `+`/`-` line for one index change.
+fn index_line(output: &mut String, sigil: char, idx: &IndexInfo) {
+    let unique_marker = if idx.is_unique { " [unique]" } else { "" };
+    let type_marker = idx
+        .index_type
+        .as_ref()
+        .map(|t| format!(" [{}]", t))
+        .unwrap_or_default();
+    output.push_str(&format!(
+        "      {} Index '{}' on ({}){}{}\n",
+        sigil,
+        idx.name,
+        idx.columns.join(", "),
+        unique_marker,
+        type_marker
+    ));
+}
+
+/// `    <label> PKs: a, b, c... (+N more)` for a non-empty sample (verbose mode).
+fn sample_line(output: &mut String, label: &str, samples: &[String], total: u64) {
+    if samples.is_empty() {
+        return;
+    }
+    let remaining = total as usize - samples.len();
+    let suffix = if remaining > 0 {
+        format!("... (+{} more)", remaining)
+    } else {
+        String::new()
+    };
+    output.push_str(&format!(
+        "    {} PKs: {}{}\n",
+        label,
+        samples.join(", "),
+        suffix
+    ));
 }

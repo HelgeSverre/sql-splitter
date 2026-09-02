@@ -1,6 +1,9 @@
 //! Shard command CLI handler.
 
-use super::common::{BEHAVIOR, FILTERING, INPUT_OUTPUT, LIMITS, MODE, OUTPUT_FORMAT};
+use super::common::{
+    comma_list, print_row_totals, print_table_breakdown, BEHAVIOR, FILTERING, INPUT_OUTPUT, LIMITS,
+    MODE, OUTPUT_FORMAT,
+};
 use crate::parser::SqlDialect;
 use crate::shard::{self, GlobalTableMode, ShardConfig, ShardStats, ShardTableClassification};
 use clap::{Args, ValueHint};
@@ -44,7 +47,7 @@ pub struct ShardArgs {
 
     /// Handle lookup tables: none, lookups, all
     #[arg(long, default_value = "lookups", help_heading = FILTERING)]
-    include_global: Option<String>,
+    include_global: GlobalTableMode,
 
     /// Fail on FK integrity violations
     #[arg(long, help_heading = BEHAVIOR)]
@@ -182,17 +185,7 @@ pub fn run(args: ShardArgs) -> anyhow::Result<()> {
     let dialect_resolved = super::common::resolve_dialect(&file, dialect.as_deref(), json)?;
 
     // Parse root tables
-    let root_tables_list: Vec<String> = root_tables
-        .map(|r| r.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
-
-    // Parse include_global mode
-    let include_global_mode = if let Some(ref mode) = include_global {
-        mode.parse::<GlobalTableMode>()
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-    } else {
-        GlobalTableMode::Lookups
-    };
+    let root_tables_list: Vec<String> = root_tables.as_deref().map(comma_list).unwrap_or_default();
 
     // Handle multi-tenant mode
     if let Some(values) = tenant_values {
@@ -236,7 +229,7 @@ pub fn run(args: ShardArgs) -> anyhow::Result<()> {
                 tenant_column: tenant_column.clone(),
                 tenant_value: tenant_val.clone(),
                 root_tables: root_tables_list.clone(),
-                include_global: include_global_mode,
+                include_global,
                 dry_run,
                 progress: false,
                 config_file: config.clone(),
@@ -305,7 +298,7 @@ pub fn run(args: ShardArgs) -> anyhow::Result<()> {
         tenant_column: tenant_column.clone(),
         tenant_value: tenant_val.clone(),
         root_tables: root_tables_list,
-        include_global: include_global_mode,
+        include_global,
         dry_run,
         progress: progress && !json,
         config_file: config,
@@ -404,37 +397,17 @@ fn print_stats(stats: &shard::ShardStats, dry_run: bool, progress: bool) {
     eprintln!("  Tables with data: {}", stats.tables_with_data);
     eprintln!("  Tables skipped: {}", stats.tables_skipped);
 
-    let percent = if stats.total_rows_seen > 0 {
-        (stats.total_rows_selected as f64 / stats.total_rows_seen as f64) * 100.0
-    } else {
-        0.0
-    };
-    eprintln!(
-        "  Total rows: {} / {} ({:.1}%)",
-        stats.total_rows_selected, stats.total_rows_seen, percent
+    print_row_totals(
+        stats.total_rows_selected,
+        stats.total_rows_seen,
+        "skipped",
+        stats.fk_orphans_skipped,
+        &stats.warnings,
     );
 
-    if stats.fk_orphans_skipped > 0 {
-        eprintln!("  FK orphans skipped: {}", stats.fk_orphans_skipped);
-    }
-
-    if !stats.warnings.is_empty() {
-        eprintln!();
-        for warning in &stats.warnings {
-            eprintln!("  Warning: {}", warning);
-        }
-    }
-
     if dry_run {
-        eprintln!();
-        eprintln!("Per-table breakdown:");
-        for table_stat in &stats.table_stats {
-            let pct = if table_stat.rows_seen > 0 {
-                (table_stat.rows_selected as f64 / table_stat.rows_seen as f64) * 100.0
-            } else {
-                0.0
-            };
-            let class_str = match table_stat.classification {
+        print_table_breakdown(stats.table_stats.iter().map(|t| {
+            let label = match t.classification {
                 ShardTableClassification::TenantRoot => " [tenant-root]",
                 ShardTableClassification::TenantDependent => " [dependent]",
                 ShardTableClassification::Junction => " [junction]",
@@ -442,10 +415,7 @@ fn print_stats(stats: &shard::ShardStats, dry_run: bool, progress: bool) {
                 ShardTableClassification::System => " [system]",
                 ShardTableClassification::Unknown => " [unknown]",
             };
-            eprintln!(
-                "  {}{}: {} / {} rows ({:.1}%)",
-                table_stat.name, class_str, table_stat.rows_selected, table_stat.rows_seen, pct
-            );
-        }
+            (t.name.as_str(), label, t.rows_selected, t.rows_seen)
+        }));
     }
 }
