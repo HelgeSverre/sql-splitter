@@ -5,8 +5,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn get_binary_path() -> String {
-    std::env::var("CARGO_BIN_EXE_sql-splitter")
-        .unwrap_or_else(|_| "target/debug/sql-splitter".to_string())
+    env!("CARGO_BIN_EXE_sql-splitter").to_string()
 }
 
 fn create_test_dump(dir: &TempDir) -> std::path::PathBuf {

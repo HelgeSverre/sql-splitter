@@ -6,10 +6,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn sql_splitter_cmd() -> Command {
-    let path = std::env::current_dir()
-        .unwrap()
-        .join("target/debug/sql-splitter");
-    Command::new(path)
+    Command::new(env!("CARGO_BIN_EXE_sql-splitter"))
 }
 
 fn create_temp_file(dir: &TempDir, name: &str, content: &str) -> std::path::PathBuf {
